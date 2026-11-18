@@ -1,18 +1,27 @@
 # Bounds for dispatch.yml's `triage` and `research` kinds, whose runs hand
 # back comments only. dispatch.toml's repositories, and besides them
-# bootc-dev's, as upstream has them (its decision D17): triage and research
-# may answer in the bootc-dev thread an operator comment came from, and
-# agent-board starts only fix, triage and research runs from those
-# comments (its docs/design.md, operatorComments). Whether that holds here
-# is jmarrero's decision before the pass applies (jmarrero-forge/tracker#42).
-# Nothing else posts there:
+# bootc-dev's: the operator's comments there become runs, and by the
+# operator's decision D17 (docs/operator-notes.md, 2026-10-17) triage and
+# research may answer in the bootc-dev thread the comment came from. D17
+# names the organization, not repositories, as does agent-board.json's
+# operatorComments, hence its one rule: agentic-job takes organization
+# rules only beside exact names, not globs, so it admits bootc-dev's
+# public, unarchived repositories that are not forks. agent-board starts only fix,
+# triage and research runs from those comments (its docs/design.md,
+# operatorComments), triage or research on someone else's pull request
+# with a tracker issue as the item. Nothing else posts there: a session
+# has session.toml, which names no bootc-dev repository, and
 # implement and review keep dispatch.toml (midstream.toml on a midstream
-# fork), which does not name bootc-dev, and a fix there is fix.toml's.
-# bootc-dev is external, so this file opens no pull request and exempts no
-# protected file anywhere.
+# fork), which does not name bootc-dev, and a fix there is fix.toml's. bootc-dev is external (docs/operator-notes.md,
+# 2026-10-09), so this file opens no pull request and exempts no protected
+# file anywhere.
+# The maintain stage's daily digest (pass.json's `maintain`) is a `research`
+# run on cgwalters-forge/tracker#965, whose one add_comment is the public
+# digest; it names only public repositories (agent-board's docs/pass.md,
+# Maintain).
 hosts = ["github.com"]
-# config-test/ keeps every name of dispatch.toml and midstream.toml here.
-repos = ["jmarrero-forge/tracker", "jmarrero-forge/actions", "jmarrero-forge/homegit", "jmarrero-forge/bootc", "jmarrero-forge/composefs-rs", "jmarrero-forge/bcvk", "jmarrero-forge/rpm-ostree", "jmarrero-forge/ostree", "jmarrero-forge/image-builder", "jmarrero-forge/osbuild", "bootc-dev/*"]
+# config-test/ keeps every entry of dispatch.toml and midstream.toml here.
+repos = [{ org = "cgwalters-forge", forks = false }, "cgwalters-forge-stage/board-test", "cgwalters-bot/praxis-credential-broker", { org = "cgwalters-forge", forks = true, topics = ["bot-midstream"], properties = { origin = "fork" } }, { org = "bootc-dev", forks = false }]
 bases = ["main"]
 max_outputs = 3
 max_patch_bytes = 1048576

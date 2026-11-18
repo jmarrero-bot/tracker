@@ -1,7 +1,7 @@
-# Our own actions are followed at main (#544), and our wrappers are pinned
-# by commit; everything else keeps zizmor's default, a pin by commit.
+# Our own reusable workflows and actions are followed at main (#544);
+# everything else keeps zizmor's default, a pin by commit.
 rules:
   unpinned-uses:
     config:
       policies:
-        jmarrero-forge/*: ref-pin
+        cgwalters-forge/*: ref-pin

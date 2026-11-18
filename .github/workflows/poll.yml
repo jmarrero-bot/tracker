@@ -2,20 +2,16 @@
 # requests, refreshes usage from the broker, plans and applies the operator's
 # epics, starts board work by Priority, WIP and pace, and derives board
 # Status. The configuration is .github/pass.json on the default branch.
-# Here every pass is a preview (jmarrero-forge/tracker#40): pass.json starts
-# no work and follows nothing, the pass reads with the read-only
-# JMARRERO_BOT_READ_TOKEN, it applies only once the variable PASS_APPLY is
-# `enabled`, whether scheduled or started by hand, and even then its caps
-# take no board or forge step (only `next` would start the following
-# pass). Cutover (#42) moves GH_TOKEN to JMARRERO_BOT_PAT and the caps to
-# upstream's.
 name: poll
-run-name: pass${{ inputs.apply && vars.PASS_APPLY == 'enabled' && ' (apply)' || '' }}
+run-name: pass${{ inputs.apply && ' (apply)' || '' }}
 
 # The clock is the `next` job: each applying pass starts the next one ten
-# minutes after its own start. GitHub drops most `*/10` scheduled runs, so
-# the schedule only restarts a broken chain; a pass keeps no state of its
-# own, so a late or dropped one costs nothing but time.
+# minutes after its own start, and `next-fallback` stands in when `next`
+# fails or GitHub never creates it. GitHub drops most `*/10` scheduled runs
+# (hours apart on 2026-11-08), so the schedule restarts a broken chain only
+# eventually, not within one interval. Its disposable response cache
+# comes from a validated applying predecessor; bootstrap runs discover one.
+# Living status stays disabled until replay records have independent durability.
 on:
   schedule:
     - cron: '*/10 * * * *'
@@ -25,13 +21,18 @@ on:
         description: Take the steps; otherwise only preview
         type: boolean
         default: false
+      previous_run_id:
+        description: Preceding applying poll run (empty discovers a trusted predecessor)
+        type: string
+        required: false
+        default: ''
 
 permissions: {}
 # The agent-board commit the pass runs. It is given the bot's token, so it is
 # a revision reviewed here, never agent-board's moving branch: move it only
 # with a review of what that revision's `pass` does.
 env:
-  AGENT_BOARD_REV: 730d1112597fc0a94d89576845237fb3b0610dc0
+  AGENT_BOARD_REV: 52adc0d6996cbe7e56cfec0598b6194cfab74357
 
 jobs:
   pass:
@@ -56,9 +57,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+      # A GitHub release outage (504s for over an hour on 2026-11-08) must not
+      # stop the job: build the same just from crates.io instead.
+      - id: just
+        continue-on-error: true
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
         with:
           just-version: 1.58.0
+      - if: steps.just.outcome == 'failure'
+        run: cargo install --locked --version 1.58.0 just && echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       # Built each pass and never cached: a cache any job on the default
       # branch can write is not where a binary given the bot's token should
       # come from.
@@ -70,20 +77,12 @@ jobs:
       # Stage 2 reads the broker's /usage over the tailnet. Without the
       # join the pass runs without usage.url, pacing on the published
       # snapshot, rather than failing on a broker it cannot reach.
-      # Ours: the join waits until pass.json has a usage section, the only
-      # thing it is for, so that a preview adds no tailnet node.
-      - name: Whether the pass reads usage
-        id: usage
-        run: echo "usage=$(jq 'has("usage")' .github/pass.json)" >> "$GITHUB_OUTPUT"
       - name: Join the tailnet
         id: tailnet
-        if: ${{ steps.usage.outputs.usage == 'true' }}
         continue-on-error: true
         timeout-minutes: 3
-        uses: jmarrero-forge/actions/tailscale@main
+        uses: cgwalters-forge/actions/tailscale@main
         with:
-          oauth-client-id: ${{ vars.AGENTIC_JOB_TAILSCALE_OAUTH_CLIENT_ID }}
-          tags: ${{ vars.AGENTIC_JOB_TAILSCALE_TAGS }}
           hostname: pass-${{ github.run_id }}-${{ github.run_attempt }}
       # The broker's address stays in the variable the agent job, the
       # broker probe and the tailnet test read (else the organization's
@@ -97,31 +96,115 @@ jobs:
           base=${base%/v1}
           jq --arg base "$base" 'if $base == "" then . else .usage.url = "\($base)/usage" end' \
             .github/pass.json > "$RUNNER_TEMP/pass.json"
+      # Threat: a forged cached body can steer scheduling even with a valid
+      # ETag. Validate the named or discovered applying run after its pass job ends.
+      - name: Validate predecessor
+        id: predecessor
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIOUS_RUN_ID: ${{ inputs.previous_run_id }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: just pass-state validate
+      - name: Restore pass state
+        id: restore
+        if: steps.predecessor.outputs.run-id != ''
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.predecessor.outputs.run-id }}
+          name: pass-state
+          path: .state
+      - name: Start cold after an unreadable artifact
+        if: steps.restore.outcome == 'failure'
+        run: rm -rf .state
+      - name: Prepare state directory
+        run: mkdir -p .state
       - name: One pass
+        id: pass
         timeout-minutes: 18
         env:
-          # The bot's read-only token: it reads the organization's board
-          # and can write nothing. Upstream's is the bot's write token.
-          GH_TOKEN: ${{ secrets.JMARRERO_BOT_READ_TOKEN }}
+          # The bot's token: it reads the organization's board and the
+          # private usage issue, and makes the pass's writes.
+          GH_TOKEN: ${{ secrets.CGWALTERS_BOT_PAT }}
           DISPATCH_TOKEN: ${{ github.token }}
           AGENT_BOARD: ${{ runner.temp }}/agent-board/bin/agent-board
           # A scheduled pass applies once the operator sets PASS_APPLY; a
-          # pass started by hand applies only when asked to, and here only
-          # while PASS_APPLY is set too.
+          # pass started by hand applies only when asked to.
           APPLY: >-
-            ${{ vars.PASS_APPLY == 'enabled' && (github.event_name == 'schedule' ||
+            ${{ ((github.event_name == 'schedule' && vars.PASS_APPLY == 'enabled') ||
             (github.event_name == 'workflow_dispatch' && inputs.apply)) && '--apply' || '' }}
         shell: bash
-        # The caps of the preview: no run started and no write step taken
-        # (Status changes included), even with --apply, and the Status stage
-        # refused whole over 25 changes; stderr too, so that the summary
-        # says why a pass failed. Upstream's are 8, 20 and 50.
+        # The caps of the first scheduled passes, until they have been
+        # watched; stderr too, so that the summary says why a pass failed.
         # Dispatch picks one fix bounds file per target, so the pass needs both.
         run: |
           "$AGENT_BOARD" pass --config "$RUNNER_TEMP/pass.json" ${APPLY:+"$APPLY"} \
             --fix-bounds .github/agentic-job/fix.toml \
             --fix-bounds .github/agentic-job/midstream-fix.toml \
-            --max-dispatch 0 --max-writes 0 --max-status-changes 25 2>&1 | tee "$RUNNER_TEMP/pass.log"
+            --max-dispatch 20 --max-writes 60 --max-status-changes 50 2>&1 | tee "$RUNNER_TEMP/pass.log"
+      # Threat: raw state includes private usage/holds comments and status records.
+      # Export only allowed responses and ledger entries in public repositories.
+      - name: Prepare public pass state
+        id: state
+        if: >-
+          ${{ !cancelled() && (steps.pass.outcome == 'success' || steps.pass.outcome == 'failure') &&
+          ((github.event_name == 'schedule' && vars.PASS_APPLY == 'enabled') ||
+          (github.event_name == 'workflow_dispatch' && inputs.apply)) }}
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: just pass-state export
+      - name: Upload pass state
+        if: ${{ !cancelled() && steps.state.outcome == 'success' }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pass-state
+          path: |
+            .state/public/pass.json
+            .state/public/living-status.json
+          include-hidden-files: true
+          retention-days: 1
+          if-no-files-found: ignore
+      # GitHub drops agent-board-pin.yml's hourly runs too, so the pass starts
+      # it when agent-board's head is not the pin and has no pin PR yet (the
+      # title is the one `just bump-agent-board` gives it); the pin workflow
+      # checks CI and stays idempotent, and its schedule is the fallback.
+      # Threat: these two in-org reads do not need the long-lived bot writer
+      # credential. Opt in only after the org's tracker-poll-reads policy lands;
+      # an enabled exchange failure must not fall back to the PAT.
+      - name: Mint the poll read token
+        id: poll-read-token
+        if: ${{ !cancelled() && vars.AGENT_BOARD_PIN == 'enabled' && vars.POLL_READ_STS_DOMAIN != '' }}
+        timeout-minutes: 1
+        uses: octo-sts/action@f603d3be9d8dd9871a265776e625a27b00effe05 # v1.1.1
+        with:
+          domain: ${{ vars.POLL_READ_STS_DOMAIN }}
+          scope: cgwalters-forge
+          identity: tracker-poll-reads
+      - name: Start the agent-board pin bump
+        if: ${{ !cancelled() && vars.AGENT_BOARD_PIN == 'enabled' && (vars.POLL_READ_STS_DOMAIN == '' || steps.poll-read-token.outcome == 'success') }}
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ vars.POLL_READ_STS_DOMAIN == '' && secrets.CGWALTERS_BOT_PAT || steps.poll-read-token.outputs.token }}
+          DISPATCH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          [[ -n $GH_TOKEN ]] || { echo '::error::missing poll read token'; exit 1; }
+          source=$(jq -er .source .github/poll/agent-board.json)
+          branch=$(jq -er .branch .github/poll/agent-board.json)
+          bot=$(jq -er .bot .github/poll/agent-board.json)
+          head=$(gh api "repos/${source#https://github.com/}/commits/$branch" --jq .sha)
+          [[ $head =~ ^[0-9a-f]{40}$ ]] || { echo "::error::no head for $source $branch"; exit 1; }
+          if [[ $head == "$AGENT_BOARD_REV" ]]; then echo "the pin is $branch's head"; exit 0; fi
+          title="workflows: Move agent-board to ${head:0:7}"
+          open=$(gh pr list --repo "$GITHUB_REPOSITORY" --author "$bot" --head agent-board-pin --state open --json title --jq '.[0].title // ""')
+          if [[ $open == "$title" ]]; then echo "already proposed: $title"; exit 0; fi
+          GH_TOKEN=$DISPATCH_TOKEN gh workflow run agent-board-pin.yml --repo "$GITHUB_REPOSITORY" --ref "$DEFAULT_BRANCH"
       - name: Summary
         if: ${{ !cancelled() }}
         run: |
@@ -147,7 +230,11 @@ jobs:
     # pass. While RELEASE_TRAIN is `dry-run` or `apply`, `next` also starts
     # release-train.yml when its newest run is an hour old or absent, since
     # GitHub drops its hourly schedule too; the train's own gate and
-    # concurrency still decide what that run does.
+    # concurrency still decide what that run does. Supervisor wakes use a
+    # thirty-minute threshold. With MAINTAIN_SHADOW `enabled`, `next` also
+    # starts maintain-shadow.yml when its newest default-branch run is at
+    # least thirty minutes old or absent; failures only warn. Its cron is
+    # the fallback, and its preview keeps its own read-only job token.
     concurrency:
       group: pass-next
       cancel-in-progress: true
@@ -156,7 +243,7 @@ jobs:
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
       (github.event_name == 'schedule' || inputs.apply) }}
     runs-on: ubuntu-26.04
-    # The verified download, ten-minute wait and bounded retries for both workflows.
+    # The verified download, ten-minute wait and bounded keep-alive requests.
     timeout-minutes: 30
     permissions:
       actions: write
@@ -164,14 +251,35 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+      # A GitHub release outage (504s for over an hour on 2026-11-08) must not
+      # stop the job: build the same just from crates.io instead.
+      - id: just
+        continue-on-error: true
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
         with:
           just-version: 1.58.0
+      - if: steps.just.outcome == 'failure'
+        run: cargo install --locked --version 1.58.0 just && echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Install verified agent-board
         env:
           GH_TOKEN: ${{ github.token }}
         timeout-minutes: 10
         run: just build-agent-board "$AGENT_BOARD_REV"
+      - name: Start the shadow poll if stale
+        if: ${{ vars.MAINTAIN_SHADOW == 'enabled' }}
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          if latest=$(timeout 30s gh run list --workflow maintain-shadow.yml --branch "$DEFAULT_BRANCH" --limit 1 --json createdAt --jq '.[0].createdAt // empty'); then
+            if [[ -z $latest ]] || (( $(date +%s) - $(date -d "$latest" +%s) >= 1800 )); then
+              timeout 30s gh workflow run maintain-shadow.yml --ref "$DEFAULT_BRANCH" || echo '::warning::Could not start maintain-shadow.yml'
+            fi
+          else
+            echo '::warning::Could not check maintain-shadow.yml age'
+          fi
       - name: Start the next pass ten minutes after this one started
         env:
           GH_TOKEN: ${{ github.token }}
@@ -190,15 +298,21 @@ jobs:
             train=(--train-workflow release-train.yml --train-stale-minutes 60)
           fi
           "$RUNNER_TEMP/agent-board/bin/agent-board" pass next --workflow poll.yml \
-            --branch "$DEFAULT_BRANCH" --input apply=true --apply-title 'pass (apply)' \
+            --branch "$DEFAULT_BRANCH" --input apply=true --input "previous_run_id=$GITHUB_RUN_ID" --apply-title 'pass (apply)' \
             --wait-minutes 10 "${supervisor[@]}" "${train[@]}"
 
-  # A setup/download failure in `next` must not break the chain. Use only
-  # runner tools, and make one dispatch attempt: failure stays visible and
-  # has no further recovery job. Previews and cancelled runs never recover.
+  # Best-effort recovery when `next` fails or never runs, including a missing
+  # `pass`. Use only runner tools and one dispatch attempt; there is no further
+  # recovery job. Dropped GitHub schedules/jobs still prevent a within-one-
+  # interval guarantee. Previews and cancelled/replaced passes never recover.
   next-fallback:
-    needs: next
-    if: ${{ !cancelled() && needs.next.result == 'failure' && vars.PASS_APPLY == 'enabled' }}
+    needs: [pass, next]
+    if: >-
+      ${{ !cancelled() && needs.pass.result != 'cancelled' &&
+      (needs.next.result == 'failure' || needs.next.result == 'skipped' || needs.next.result == '') &&
+      vars.PASS_APPLY == 'enabled' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.apply)) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 12
     permissions:
@@ -208,10 +322,38 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PASS_RESULT: ${{ needs.pass.result }}
+          NEXT_RESULT: ${{ needs.next.result }}
         shell: bash
         run: |
-          started=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .run_started_at)
-          delay=$(( $(date -d "$started" +%s) + 600 - $(date +%s) ))
+          printf 'Recovery dependencies: pass=<%s> next=<%s>\n' "$PASS_RESULT" "$NEXT_RESULT"
+          started=$(timeout 30s gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .run_started_at)
+          [[ -n $started && $started != null ]] || { echo '::error::missing run start time' >&2; exit 1; }
+          started_epoch=$(date -d "$started" +%s)
+          delay=$(( started_epoch + 600 - $(date +%s) ))
           if (( delay > 600 )); then delay=600; fi
           if (( delay > 0 )); then sleep "$delay"; fi
-          gh workflow run poll.yml --repo "$GITHUB_REPOSITORY" --ref "$DEFAULT_BRANCH" -f apply=true
+          # Threat: a recovered old run can fork an already-owned chain. Match
+          # pinned pass next's branch, event/title, active statuses, creation-time
+          # and ID ordering, and fail if this run is outside its 200-run bound.
+          runs='[]'
+          for page in 1 2; do
+            listed=$(timeout 30s gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/poll.yml/runs" \
+              -f branch="$DEFAULT_BRANCH" -f exclude_pull_requests=true -f per_page=100 -f page="$page")
+            runs=$(jq -ce --argjson listed "$listed" '. + ($listed.workflow_runs | if type == "array" then . else error("missing workflow_runs") end)' <<< "$runs")
+            if jq -e --argjson id "$GITHUB_RUN_ID" 'any(.[]; .id == $id)' <<< "$runs" >/dev/null; then break; fi
+            if (( $(jq '.workflow_runs | length' <<< "$listed") < 100 )); then break; fi
+          done
+          newer=$(jq -r --argjson id "$GITHUB_RUN_ID" --arg branch "$DEFAULT_BRANCH" '
+            def created: .created_at | fromdateiso8601;
+            map(if (.id | type) == "number" and
+              all(.head_branch, .status, .event, .created_at; type == "string") and
+              (.event != "workflow_dispatch" or (.display_title | type) == "string")
+              then (created as $at | .) else error("invalid workflow run") end) |
+            (map(select(.id == $id))[0] // error("current run absent from bounded listing")) as $me |
+            first(.[] | select(.id != $id and .head_branch == $branch and
+              (.status == "queued" or .status == "waiting" or .status == "pending" or .status == "requested" or .status == "in_progress") and
+              (.event == "schedule" or (.event == "workflow_dispatch" and .display_title == "pass (apply)")) and
+              ([created, .id] > [($me | created), $id])) | .id) // empty' <<< "$runs")
+          if [[ -n $newer ]]; then echo "run $newer continues the chain; not starting another"; exit 0; fi
+          timeout 30s gh workflow run poll.yml --repo "$GITHUB_REPOSITORY" --ref "$DEFAULT_BRANCH" -f apply=true -f "previous_run_id=$GITHUB_RUN_ID"
