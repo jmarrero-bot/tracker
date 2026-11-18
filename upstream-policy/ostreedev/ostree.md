@@ -1,8 +1,11 @@
 ---
 verdict: bot-ok
-ai-trailer: generic AI attribution; no written upstream AI-specific requirement
-dco: no (docs/CONTRIBUTING.md says Signed-off-by is not required; operator promotion sign-off is still required by tracker)
+ai-trailer: default (Generated-by: AI); nothing written, and precedent on main is Assisted-by or Generated-by (12 of the last 100 commits, four authors)
+dco: no (docs/CONTRIBUTING.md says Signed-off-by is not required, the main ruleset has no status checks, and no DCO check ran on the 8 recent PR heads sampled)
 sources:
+  - repo: ostreedev/ostree
+    path: .gemini
+    sha: 88df54196690e5750f622b07aaa84a91abbaec7a
   - repo: ostreedev/ostree
     path: CONTRIBUTING.md
     sha: 49d1b98f97e06d65fd653f76d26aecc174771064
@@ -12,31 +15,44 @@ sources:
   - repo: ostreedev/ostree
     path: docs/contributing-tutorial.md
     sha: 0bcf8feb5f35b9683eb2ef2cc6c812cbe0c0bb78
-  - repo: ostreedev/ostree
-    path: .gemini
-    sha: 88df54196690e5750f622b07aaa84a91abbaec7a
-checked: 2026-11-11; default-branch sources and policy-name inventory rechecked against GitHub
-rebase: any
+checked: 2026-09-25 by the policy-check subagent (coordinator session 929c7a64, converted from an earlier read-only survey and re-read against current upstream)
 ---
 
-# ostreedev/ostree contribution policy
+No file mentions AI, LLMs or disclosure trailers. There is no AGENTS.md, no PR
+template, and no ostreedev/.github repository. The top-level CONTRIBUTING.md
+is a symlink to `docs/CONTRIBUTING.md`; `docs/contributing-tutorial.md` is a
+build walkthrough; `.gemini/config.yaml` only tunes Gemini code review.
 
-> This text is LLM generated.
+## Quotes
 
-Seeded from [homegit's record](https://github.com/cgwalters/homegit/blob/c027d9f4/upstream-policy/ostreedev/ostree.md),
-including its operator-default update of 5 October. No scanned contribution
-document prohibits AI-written text or bot accounts. The standing operator
-default in [tracker#245](https://github.com/cgwalters-forge/tracker/issues/245)
-permits upstream posting as the bot after acceptance of the forge PR.
+> "Instead, we use an instance of
+> [Homu](https://github.com/servo/homu), currently known as
+> `cgwalters-bot`."
+> — ostreedev/ostree docs/CONTRIBUTING.md (3574c9e2aa50), "Submitting patches"
 
-[docs/CONTRIBUTING.md](https://github.com/ostreedev/ostree/blob/main/docs/CONTRIBUTING.md)
-says "You may use Signed-off-by, but we're not requiring it." Its reference
-to cgwalters-bot as Homu is historical, not evidence of AI permission.
-Tracker nevertheless requires operator sign-off at promotion even without
-an upstream DCO check; the pinned promoter implements that requirement.
+> "Please look at `git log` and match the commit log style, which is very
+> similar to the
+> [Linux kernel](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git).
+>
+> You may use `Signed-off-by`, but we're not requiring it."
+> — ostreedev/ostree docs/CONTRIBUTING.md (3574c9e2aa50), "Commit message style"
 
-The inventory covered the root, .github, docs and doc in this repository and
-ostreedev/.github (absent). The contents API lists CONTRIBUTING.md as a file
-with the recorded ID; its text aliases docs/CONTRIBUTING.md, also recorded.
-The operator's [10 November decision](https://github.com/cgwalters-forge/tracker/issues/1464#issuecomment-6782560935)
-allows a clean promotion rebase without another approval; conflicts hold.
+The first quote is historical: the `cgwalters-bot` account was the project's
+Homu merge bot, which says nothing about AI contributions from it now.
+
+## Rationale
+
+human-text, because nothing is written down. Silence alone would pass as bot-ok under policy-check.md, but these records were seeded conservatively: with no written word on AI-written PR text or commit messages, the bot drafts the code and cgwalters writes the text. Precedent favors
+AI-assisted commits (12 of the last 100 on main carry Assisted-by or
+Generated-by, from four authors), but none of it speaks to bot-written PR text.
+cgwalters is an ostree maintainer; landing the bootc-dev common AGENTS.md here
+would make it bot-ok on re-check.
+
+## Operator default for silent repositories (2026-10-15)
+
+The sources say nothing that forbids AI-written text or bot accounts. The
+verdict was human-text only as a conservative default. jmarrero adopted
+cgwalters' standing default for these repositories (jmarrero-forge/tracker#23):
+when he accepts a forge PR, it is posted upstream under the bot identity, and
+upstream rules on LLMs are an advisory warning unless they clearly disallow
+bot accounts.

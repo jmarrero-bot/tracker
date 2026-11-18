@@ -1,24 +1,18 @@
 # Bounds for dispatch.yml: the repositories a dispatched run may target.
-# The organization's own repositories by one rule that agentic-job's policy
-# checks against live metadata: public, unarchived and not a fork. The
-# midstream forks are not admitted here: their bounds are midstream.toml,
-# which dispatch.yml picks for them by their metadata, so that every pull
-# request there stays a draft (#336). Other owners' repositories are exact
-# names, no globs, which metadata cannot select.
-# The bot-owned praxis-credential-broker is followed, but pr.noMerge keeps
-# automatic merging disabled pending review prerequisites (docs/bring-up.md).
-# The organization site cgwalters-forge/cgwalters-forge.github.io is a target
-# for the weekly notes post (weekly-blog.yml). The poll follows it, but it has
-# no review workflow yet, so only the operator's approval merges its posts.
-# The maintain stage's daily digest (pass.json's `maintain`) is public, on
-# tracker#965 (comment.toml).
-# The private cgwalters-forge/bot-ops stays no target (#963): a run
+# Our own repositories by exact name: they are GitHub forks of
+# cgwalters-forge's, so upstream's organization rule (public, unarchived
+# and not a fork) would not admit them. The midstream forks are not
+# admitted here: their bounds are midstream.toml, which dispatch.yml picks
+# for them by their metadata, so that every pull request there stays a
+# draft (#336 upstream). Other owners' repositories are exact names, no
+# globs. homegit is a target by hand only: the pass does not schedule it.
+# The private jmarrero-forge/bot-ops stays no target: a run
 # dispatched here publishes its transcript and outputs in this public
 # repository (agentic-job's docs/private-repositories.md), the policy job
 # refuses a private target and the wrapper a private caller. A private
 # target would need a dispatch workflow and agent job in bot-ops itself.
 hosts = ["github.com"]
-repos = [{ org = "cgwalters-forge", forks = false }, "cgwalters-forge-stage/board-test", "cgwalters-bot/praxis-credential-broker"]
+repos = ["jmarrero-forge/tracker", "jmarrero-forge/actions", "jmarrero-forge/agenthome", "jmarrero-forge/homegit"]
 bases = ["main"]
 max_outputs = 3
 max_patch_bytes = 1048576
@@ -44,21 +38,11 @@ missing_data = { max = 1 }
 # prerequisites are in agentic-job's docs/safe-outputs.md. `files` also lets them
 # edit AGENTS.md, a protected file by default, there.
 [unprotected_files]
-# This repository by the operator's decision: docs/operator-notes.md, "2026-10-13, the harness evolving itself".
-# A repository is listed only once a ruleset on its main requires an approving
-# review with stale approvals dismissed on push: that review is the only gate
-# on a run's `.github/` edit there. The organisation's ruleset (25084478) does
-# so on every cgwalters-forge repository; review's own ruleset (24017897)
-# requires none, so there it rests on 25084478 with review's workflow (review#62).
-# Where there is no review workflow, as in misctool, only the operator
-# can give that approval; its first `.github/` change should add one, approved by the
-# operator. actions holds the shared wrapper every repository's runs call, so
-# its gate matters most. Its own ruleset (24147876) requires no approval, but
-# 25084478 with its review workflow (cgwalters-forge/actions#28) makes it the
-# same review gate as agentic-job's. Callers use actions at @main, not a release,
-# so a merge there takes effect at once. Its workflows are under `.github/`;
-# while it was unlisted, no run could change them.
-repos = ["cgwalters-forge/agentic-job", "cgwalters-forge/agent-board", "cgwalters-forge/tracker", "cgwalters-forge/review", "cgwalters-forge/actions", "cgwalters-forge/agenthome", "cgwalters-forge/misctool"]
+# None yet: a repository is listed only once a ruleset on its main requires
+# an approving review with stale approvals dismissed on push, since that
+# review is the only gate on a run's `.github/` edit there
+# (jmarrero-forge/tracker#41). fix.toml keeps the same list.
+repos = []
 # README.md too: a docs run there is refused otherwise (cgwalters-forge/agent-board#49).
 # And every other name on agentic-job's default protected list, by the
 # operator's decision (21 Oct): a blocked manifest or lockfile meant a run

@@ -2,8 +2,10 @@
 # .github/agentic-job/merge.toml (agentic-job's docs/review.md#merge-policy),
 # once the ruleset on main requires review from code owners: the workflows,
 # bounds, profiles and poll scripts, the review's own bounds and task, and
-# the Justfile, whose recipes run with the bot's token. Nothing parses this
-# comment.
+# the Justfile, whose recipes run with the bot's token, and the upstream
+# policy records, whose verdicts gate a promotion that signs off as him.
+# Nothing parses this comment.
 /.github/ @jmarrero
 /workflow/ @jmarrero
 /Justfile @jmarrero
+/upstream-policy/ @jmarrero

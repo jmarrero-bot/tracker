@@ -1,6 +1,6 @@
 # The dispatch caller that `gh workflow run dispatch.yml` and the pass
 # (poll.yml) start. The run itself
-# is our wrapper's, cgwalters-forge/actions' cgwalters-agentic-job.yml: it
+# is our wrapper's, jmarrero-forge/actions' cgwalters-agentic-job.yml: it
 # carries the agentic-job pin, the tailnet join, the inference proxy, the
 # runner and the model. This file keeps what is this repository's: the
 # trigger and its inputs, the run name, the concurrency, the
@@ -23,9 +23,11 @@
 # `profile` job puts it before the task, so a dispatch carries only what is
 # particular to its item. The wrapper adds its own line on top, which says
 # what the kind may hand back.
-# Non-review calls pin the wrapper at agentic-job v0.6.14, whose policy reads
-# the bounds' organization rules. Review is a separate immutable call:
-# its wrapper owns REVIEW_POOLS, base policy/config and checked submission.
+# Both calls pin our wrapper at one commit, the one jmarrero's broker
+# admits (agentic-job v0.6.15, whose policy reads the bounds' organization
+# rules); upstream pins its review call at an older wrapper. Review is a
+# separate call: its wrapper owns REVIEW_POOLS, base policy/config and
+# checked submission.
 name: dispatch
 run-name: ${{ inputs.kind }} ${{ inputs.repo }}#${{ inputs.item }}${{ inputs.kind == 'review' && format(' {0} ({1})', inputs.head, inputs.pool) || (inputs.pool && format(' ({0})', inputs.pool) || '') }}${{ inputs.kind != 'review' && inputs.config == 'acp-experiment' && ' [acp-experiment]' || '' }}
 
@@ -229,9 +231,8 @@ jobs:
   review:
     needs: review-gate
     if: ${{ inputs.kind == 'review' }}
-    # Immutable wrapper from actions#217 (runner-only, agentic-job 427ce22),
-    # not a release tag.
-    uses: cgwalters-forge/actions/.github/workflows/cgwalters-agentic-job.yml@ba6c56925e63551fd4373fbeb23456a2f4a316da
+    # The same wrapper commit as the run job's, the one our broker admits.
+    uses: jmarrero-forge/actions/.github/workflows/cgwalters-agentic-job.yml@cb9a5e2183e0a33612af916507dd864e7a464154 # main, agentic-job v0.6.15 (actions#4)
     permissions:
       contents: read
       issues: write
@@ -311,7 +312,7 @@ jobs:
           EFFORT: ${{ inputs.effort }}
           KIND: ${{ inputs.kind }}
           # The wrapper's fallback without a pool, its default included.
-          AGENT: ${{ vars.AGENT || 'opencode' }}
+          AGENT: ${{ vars.AGENT || 'claude' }}
           AGENT_MODEL: ${{ vars.AGENT_MODEL }}
         run: |
           "$RUNNER_TEMP/agent-board/bin/agent-board" pools resolve --pools .github/agentic-job/pools.json \
@@ -334,10 +335,10 @@ jobs:
           echo "config=${path}" >> "$GITHUB_OUTPUT"
       # The bounds, by kind and target. Comment-only kinds have their own,
       # comment.toml, the only ones that admit bootc-dev besides fix.toml
-      # (D17, docs/operator-notes.md). A session has session.toml: its batch
+      # (upstream's D17). A session has session.toml: its batch
       # is one comment too, which the pass alone applies, within the pass's
       # own bounds (agent-board's docs/sessions.md), but only on
-      # cgwalters-forge, never bootc-dev. A midstream fork gets
+      # jmarrero-forge, never bootc-dev. A midstream fork gets
       # midstream.toml and midstream-fix.toml, which keep its pull requests
       # drafts (#336): a target whose live metadata matches midstream.toml's
       # rule, the organization, fork flag and topics that its policy checks
@@ -385,10 +386,6 @@ jobs:
           KIND: ${{ inputs.kind }}
           PULL: ${{ steps.item.outputs.pull }}
           MIDSTREAM: ${{ steps.target.outputs.midstream }}
-          REPO: ${{ inputs.repo }}
-          # Threat: an injected task turning on cross-repository publication.
-          # Only trusted caller settings opt in; unset is off, never an input.
-          SECONDARY: ${{ vars.MISCTOOL_SECONDARY }}
         run: |
           dir=.github/agentic-job
           [[ $MIDSTREAM == true || $MIDSTREAM == false ]] ||
@@ -399,9 +396,6 @@ jobs:
             session) allow=$dir/session.toml ;;
             *) allow=$dir/dispatch.toml; [[ $MIDSTREAM == true ]] && allow=$dir/midstream.toml ;;
           esac
-          if [[ "$KIND" == implement && "${SECONDARY:-}" == enabled && "${REPO,,}" != cgwalters-forge/misctool && "$allow" == "$dir/dispatch.toml" ]]; then
-            allow=$dir/implement-secondary.toml
-          fi
           fix=$dir/fix.toml
           [[ $MIDSTREAM == true ]] && fix=$dir/midstream-fix.toml
           printf 'allow=%s\nfix-allow=%s\n' "$allow" "$fix" >> "$GITHUB_OUTPUT"
@@ -436,7 +430,7 @@ jobs:
   run:
     needs: profile
     if: ${{ inputs.kind != 'review' }}
-    uses: cgwalters-forge/actions/.github/workflows/cgwalters-agentic-job.yml@780114b6409bc9aec99546bc3132a7ee9783b083
+    uses: jmarrero-forge/actions/.github/workflows/cgwalters-agentic-job.yml@cb9a5e2183e0a33612af916507dd864e7a464154 # main, agentic-job v0.6.15 (actions#4)
     # The most any job of the wrapper has: its agent job takes the reads and
     # the identity token, its policy and apply calls the comment writes.
     permissions:
@@ -473,14 +467,12 @@ jobs:
       # Recovery triage's closing and filing outputs come from recovery.toml
       # (actions#276); every other triage keeps the wrapper's comment-only set.
       triage-outputs-from-allow: ${{ needs.profile.outputs.allow == '.github/agentic-job/recovery.toml' }}
-      # The wrapper's fixed max-outputs is 3 (no caller input): with secondary
-      # bounds, two draft PRs share that ceiling with one ancillary request.
       fix-allow: ${{ needs.profile.outputs.fix-allow }}
     # The bot's token, an organization secret, named and never inherited.
     # The wrapper hands it to apply, in the environment above, and to the
     # status comment on an item of another repository; to nothing else.
     secrets:
-      SAFE_OUTPUTS_PAT: ${{ secrets.CGWALTERS_BOT_PAT }}
+      SAFE_OUTPUTS_PAT: ${{ secrets.JMARRERO_BOT_PAT }}
 
   # Threat: raw diagnostic inputs can leak through Actions' pre-script env log.
   # Opt-in public metadata only, never admission or producer attestation.

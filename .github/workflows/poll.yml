@@ -2,8 +2,13 @@
 # requests, refreshes usage from the broker, plans and applies the operator's
 # epics, starts board work by Priority, WIP and pace, and derives board
 # Status. The configuration is .github/pass.json on the default branch.
+# Ours: the pass applies only while the variable PASS_APPLY is `enabled`,
+# whether scheduled or started by hand (upstream lets a manual `apply=true`
+# through without it), so unsetting PASS_APPLY stops every write
+# (jmarrero-forge/tracker#42). pass.json follows our own repositories and
+# starts no board work yet (`wip` 0); the next lanes are pull requests to it.
 name: poll
-run-name: pass${{ inputs.apply && ' (apply)' || '' }}
+run-name: pass${{ inputs.apply && vars.PASS_APPLY == 'enabled' && ' (apply)' || '' }}
 
 # The clock is the `next` job: each applying pass starts the next one ten
 # minutes after its own start, and `next-fallback` stands in when `next`
@@ -77,12 +82,20 @@ jobs:
       # Stage 2 reads the broker's /usage over the tailnet. Without the
       # join the pass runs without usage.url, pacing on the published
       # snapshot, rather than failing on a broker it cannot reach.
+      # Ours: the join waits until pass.json has a usage section, the only
+      # thing it is for, so that a preview adds no tailnet node.
+      - name: Whether the pass reads usage
+        id: usage
+        run: echo "usage=$(jq 'has("usage")' .github/pass.json)" >> "$GITHUB_OUTPUT"
       - name: Join the tailnet
         id: tailnet
+        if: ${{ steps.usage.outputs.usage == 'true' }}
         continue-on-error: true
         timeout-minutes: 3
-        uses: cgwalters-forge/actions/tailscale@main
+        uses: jmarrero-forge/actions/tailscale@main
         with:
+          oauth-client-id: ${{ vars.AGENTIC_JOB_TAILSCALE_OAUTH_CLIENT_ID }}
+          tags: ${{ vars.AGENTIC_JOB_TAILSCALE_TAGS }}
           hostname: pass-${{ github.run_id }}-${{ github.run_attempt }}
       # The broker's address stays in the variable the agent job, the
       # broker probe and the tailnet test read (else the organization's
@@ -126,19 +139,24 @@ jobs:
         id: pass
         timeout-minutes: 18
         env:
-          # The bot's token: it reads the organization's board and the
-          # private usage issue, and makes the pass's writes.
-          GH_TOKEN: ${{ secrets.CGWALTERS_BOT_PAT }}
+          # The bot's write token (upstream's CGWALTERS_BOT_PAT) only for a
+          # pass that applies, by APPLY's own condition below; a preview
+          # reads with the read-only JMARRERO_BOT_READ_TOKEN.
+          GH_TOKEN: >-
+            ${{ vars.PASS_APPLY == 'enabled' && (github.event_name == 'schedule' ||
+            (github.event_name == 'workflow_dispatch' && inputs.apply)) && secrets.JMARRERO_BOT_PAT || secrets.JMARRERO_BOT_READ_TOKEN }}
           DISPATCH_TOKEN: ${{ github.token }}
           AGENT_BOARD: ${{ runner.temp }}/agent-board/bin/agent-board
           # A scheduled pass applies once the operator sets PASS_APPLY; a
-          # pass started by hand applies only when asked to.
+          # pass started by hand applies only when asked to, and here only
+          # while PASS_APPLY is set too.
           APPLY: >-
-            ${{ ((github.event_name == 'schedule' && vars.PASS_APPLY == 'enabled') ||
+            ${{ vars.PASS_APPLY == 'enabled' && (github.event_name == 'schedule' ||
             (github.event_name == 'workflow_dispatch' && inputs.apply)) && '--apply' || '' }}
         shell: bash
         # The caps of the first scheduled passes, until they have been
-        # watched; stderr too, so that the summary says why a pass failed.
+        # watched (upstream's); stderr too, so that the summary says why a
+        # pass failed.
         # Dispatch picks one fix bounds file per target, so the pass needs both.
         run: |
           "$AGENT_BOARD" pass --config "$RUNNER_TEMP/pass.json" ${APPLY:+"$APPLY"} \
@@ -151,7 +169,7 @@ jobs:
         id: state
         if: >-
           ${{ !cancelled() && (steps.pass.outcome == 'success' || steps.pass.outcome == 'failure') &&
-          ((github.event_name == 'schedule' && vars.PASS_APPLY == 'enabled') ||
+          vars.PASS_APPLY == 'enabled' && (github.event_name == 'schedule' ||
           (github.event_name == 'workflow_dispatch' && inputs.apply)) }}
         timeout-minutes: 2
         env:
@@ -169,42 +187,6 @@ jobs:
           include-hidden-files: true
           retention-days: 1
           if-no-files-found: ignore
-      # GitHub drops agent-board-pin.yml's hourly runs too, so the pass starts
-      # it when agent-board's head is not the pin and has no pin PR yet (the
-      # title is the one `just bump-agent-board` gives it); the pin workflow
-      # checks CI and stays idempotent, and its schedule is the fallback.
-      # Threat: these two in-org reads do not need the long-lived bot writer
-      # credential. Opt in only after the org's tracker-poll-reads policy lands;
-      # an enabled exchange failure must not fall back to the PAT.
-      - name: Mint the poll read token
-        id: poll-read-token
-        if: ${{ !cancelled() && vars.AGENT_BOARD_PIN == 'enabled' && vars.POLL_READ_STS_DOMAIN != '' }}
-        timeout-minutes: 1
-        uses: octo-sts/action@f603d3be9d8dd9871a265776e625a27b00effe05 # v1.1.1
-        with:
-          domain: ${{ vars.POLL_READ_STS_DOMAIN }}
-          scope: cgwalters-forge
-          identity: tracker-poll-reads
-      - name: Start the agent-board pin bump
-        if: ${{ !cancelled() && vars.AGENT_BOARD_PIN == 'enabled' && (vars.POLL_READ_STS_DOMAIN == '' || steps.poll-read-token.outcome == 'success') }}
-        timeout-minutes: 2
-        env:
-          GH_TOKEN: ${{ vars.POLL_READ_STS_DOMAIN == '' && secrets.CGWALTERS_BOT_PAT || steps.poll-read-token.outputs.token }}
-          DISPATCH_TOKEN: ${{ github.token }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        shell: bash
-        run: |
-          [[ -n $GH_TOKEN ]] || { echo '::error::missing poll read token'; exit 1; }
-          source=$(jq -er .source .github/poll/agent-board.json)
-          branch=$(jq -er .branch .github/poll/agent-board.json)
-          bot=$(jq -er .bot .github/poll/agent-board.json)
-          head=$(gh api "repos/${source#https://github.com/}/commits/$branch" --jq .sha)
-          [[ $head =~ ^[0-9a-f]{40}$ ]] || { echo "::error::no head for $source $branch"; exit 1; }
-          if [[ $head == "$AGENT_BOARD_REV" ]]; then echo "the pin is $branch's head"; exit 0; fi
-          title="workflows: Move agent-board to ${head:0:7}"
-          open=$(gh pr list --repo "$GITHUB_REPOSITORY" --author "$bot" --head agent-board-pin --state open --json title --jq '.[0].title // ""')
-          if [[ $open == "$title" ]]; then echo "already proposed: $title"; exit 0; fi
-          GH_TOKEN=$DISPATCH_TOKEN gh workflow run agent-board-pin.yml --repo "$GITHUB_REPOSITORY" --ref "$DEFAULT_BRANCH"
       - name: Summary
         if: ${{ !cancelled() }}
         run: |

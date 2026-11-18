@@ -8,18 +8,15 @@
 # triage-outputs-from-allow) instead of comment.toml's comment-only ones.
 # Threat: a triage misled by issue or PR text closing pull requests or
 # filing issues where it should not. Every other triage keeps comment.toml,
-# and this file admits only our own repositories by metadata, the rules of
-# dispatch.toml and midstream.toml: no bootc-dev or other owner's
-# repository, and no name agentic-job cannot check. Closing and filing are
+# and this file admits only our own repositories, dispatch.toml's names and
+# midstream.toml's rule: no bootc-dev or other owner's repository. Closing and filing are
 # on the run's repository only (agentic-job's docs/safe-outputs.md), one of
 # each, and policy drops pull requests and pushes for this analysis run.
 # agentic-job cannot yet tie the close to the item: within the repository,
 # the one close may name another pull request, which only the triage
-# profile forbids. The followed repositories outside these rules
-# (praxis-credential-broker, board-test) get no recovery: policy refuses a
-# triage of their pull requests.
+# profile forbids.
 hosts = ["github.com"]
-repos = [{ org = "cgwalters-forge", forks = false }, { org = "cgwalters-forge", forks = true, topics = ["bot-midstream"], properties = { origin = "fork" } }]
+repos = ["jmarrero-forge/tracker", "jmarrero-forge/actions", "jmarrero-forge/agenthome", "jmarrero-forge/homegit", { org = "jmarrero-forge", forks = true, topics = ["bot-midstream"], properties = { origin = "fork" } }]
 bases = ["main"]
 max_outputs = 3
 max_patch_bytes = 1048576
