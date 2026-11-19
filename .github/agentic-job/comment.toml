@@ -3,8 +3,8 @@
 # bootc-dev's, as upstream has them (its decision D17): triage and research
 # may answer in the bootc-dev thread an operator comment came from, and
 # agent-board starts only fix, triage and research runs from those
-# comments (its docs/design.md, operatorComments). Whether that holds here
-# is jmarrero's decision before the pass applies (jmarrero-forge/tracker#42).
+# comments (its docs/design.md, operatorComments). jmarrero took it as
+# upstream has it (jmarrero-forge/tracker#42).
 # Nothing else posts there:
 # implement and review keep dispatch.toml (midstream.toml on a midstream
 # fork), which does not name bootc-dev, and a fix there is fix.toml's.

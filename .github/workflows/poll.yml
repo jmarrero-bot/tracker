@@ -5,8 +5,8 @@
 # Ours: the pass applies only while the variable PASS_APPLY is `enabled`,
 # whether scheduled or started by hand (upstream lets a manual `apply=true`
 # through without it), so unsetting PASS_APPLY stops every write
-# (jmarrero-forge/tracker#42). pass.json follows our own repositories and
-# starts no board work yet (`wip` 0); the next lanes are pull requests to it.
+# (jmarrero-forge/tracker#42). pass.json follows cgwalters-forge/tracker's,
+# adapted to our repositories and the single `claude` pool.
 name: poll
 run-name: pass${{ inputs.apply && vars.PASS_APPLY == 'enabled' && ' (apply)' || '' }}
 
