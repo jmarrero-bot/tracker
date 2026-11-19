@@ -4,21 +4,52 @@
   "dispatchRepo": "jmarrero-forge/tracker",
   "dispatchWorkflow": "dispatch.yml",
   "dispatchRef": "main",
-  "board": {"owner": "jmarrero-forge", "project": 1},
-  "follow": ["jmarrero-forge/tracker", "jmarrero-forge/actions"],
+  "follow": [
+    {"org": "jmarrero-forge", "forks": true},
+    "jmarrero-forge/actions",
+    "jmarrero-forge/agenthome",
+    "jmarrero-forge/homegit",
+    "bootc-dev/bootc",
+    "composefs/composefs-rs",
+    "coreos/rpm-ostree",
+    "ostreedev/ostree"
+  ],
   "workRepositories": [
     "jmarrero-forge/tracker",
-    "jmarrero-forge/bootc",
-    "jmarrero-forge/composefs-rs",
-    "jmarrero-forge/bcvk",
-    "jmarrero-forge/rpm-ostree",
-    "jmarrero-forge/image-builder",
-    "jmarrero-forge/osbuild"
+    "jmarrero-forge/actions",
+    "jmarrero-forge/agenthome"
   ],
-  "wip": 0,
-  "triage": false,
+  "prices": {
+    "claude-opus-5-5": {"input": 4.0, "cached_input": 0.20, "output": 20.0},
+    "opus": {"input": 4.0, "cached_input": 0.20, "output": 20.0}
+  },
+  "board": {"owner": "jmarrero-forge", "project": 1},
+  "epics": {"repository": "jmarrero-forge/tracker", "inWorkRepositories": true, "maxAppliesPerPass": 3, "heldPlanHours": 24},
+  "wip": 10,
+  "openPrCap": 6,
+  "topDown": true,
+  "requestShare": 60,
+  "reserveOperator": true,
   "state": ".state/pass.json",
-  "midstream": {"owner": "jmarrero-forge", "topic": "bot-midstream"},
+  "bodyPlans": true,
+  "readFreeHolds": true,
+  "triage": true, "sweep": {"weekday": "Monday", "hourUtc": 13}, "overlap": {"staleDraftHours": 4}, "triageFollowUpDays": 1, "assignHolds": true, "notifications": true, "fixPlans": true, "authored": 3, "reserveScheduling": true, "operatorAsk": {"text":"For our own infrastructure, ask the operator only about big-picture architecture, plus posture: upstream posting, midstream promotion, credentials, broker policy, rulesets and bypasses, spending caps, security disclosure, and changes to which repositories agents may target (target bounds). For everything else, take the recommended option and record why. Mechanical follow-through (rebasing, re-running CI, fixing conflicts or refreshing a stale branch) is work, not a decision: plan it as an implement job; a rebase keeps existing Signed-off-by trailers and adds none. Only a real decision goes to the operator.","domains":["architecture","upstream","promotion","credentials","broker","ruleset","budget","security","bounds"],"harness":{"repositories":["jmarrero-forge/tracker","jmarrero-forge/actions","jmarrero-forge/agenthome","jmarrero-forge/homegit","jmarrero-forge/.github","jmarrero/atomic-setup"],"excludedLabels":["operator-action","decision","question","review-draft"],"foreignTargetLabelPrefix":"target:","replanText":"The board pass asks a triage run to plan this issue again: it is our own infrastructure, not an operator decision."}}, "midstream": {"owner": "jmarrero-forge", "topic": "bot-midstream"}, "triageClose": true, "replanInvalid": true, "replanAfterDays": 7, "idleReplan": true, "researchPlans": true,
+  "revisit": {"perPass": 1, "afterDays": 14, "heldAfterDays": 7, "repairQuestions": true},
+  "planPools": ["claude"],
+  "triagePools": ["claude"],
+  "pools": {"claude": {"target": 0.95, "burst": 50}},
+  "usage": {"repository": "jmarrero-forge/bot-ops", "issue": 1, "probe": true},
+  "holds": {"repository": "jmarrero-forge/bot-ops", "issue": 1, "needsYou": true, "passView": true, "approvalEvidence": true, "actNow": true, "today": true, "epicFocus": true,
+    "proposals": {"repository": "jmarrero-forge/tracker", "label": "operator-action", "org": "jmarrero-forge",
+      "repositories": [
+        {"org": "jmarrero-forge", "forks": false},
+        "jmarrero-forge/bootc",
+        "jmarrero-forge/composefs-rs",
+        "jmarrero-forge/bcvk",
+        "jmarrero-forge/rpm-ostree",
+        "jmarrero-forge/image-builder",
+        "jmarrero-forge/osbuild"
+      ]}},
   "promote": {
     "onApproval": true,
     "publish": true,
@@ -26,14 +57,22 @@
     "policyRepository": "jmarrero-forge/tracker",
     "policyPath": "upstream-policy"
   },
-  "pr": {
-    "staleDays": 0,
+  "pr": {"actionFirst": true, "staleDays": 0, "unstall": true, "ownSpaceOnly": true,
+    "operatorPaths": [".github/agentic-job/dispatch.toml", ".github/agentic-job/midstream.toml", ".github/agentic-job/midstream-fix.toml", ".github/agentic-job/fix.toml", ".github/agentic-job/comment.toml", ".github/agentic-job/session.toml",
+      ".github/pass.json#/triage", ".github/pass.json#/notifications", ".github/pass.json#/fixPlans", ".github/pass.json#/assignHolds", ".github/pass.json#/authored",
+      ".github/pass.json#/bodyPlans", ".github/pass.json#/idleReplan", ".github/pass.json#/researchPlans", ".github/pass.json#/triageClose", ".github/pass.json#/triageFollowUpDays",
+      ".github/pass.json#/replanAfterDays", ".github/pass.json#/revisit", ".github/pass.json#/sessions", ".github/pass.json#/sweep", ".github/pass.json#/overlap", ".github/pass.json#/midstream/topic",
+      ".github/pass.json#/pr/unstall", ".github/pass.json#/pr/staleDays", ".github/pass.json#/pr/checkReruns", ".github/pass.json#/pr/rebaseRounds", ".github/pass.json#/pr/foldRounds", ".github/pass.json#/holds/passView",
+      ".github/pass.json#/holds/approvalEvidence", ".github/pass.json#/holds/actNow", ".github/pass.json#/holds/today",
+      ".github/poll/agent-board.json", ".github/supervisor/config.json"],
+"noMerge": [{"org": "jmarrero-forge", "forks": true}],
     "reviewWorkflow": "review.yml",
     "checkReruns": true,
     "ownerBranches": true,
     "fixPools": ["claude"],
     "mergeAuthors": ["dependabot[bot]"],
     "headOwners": ["jmarrero-bot", "jmarrero-forge"],
-    "rebaseRounds": 2
+    "rebaseRounds": 2,
+    "mergeQueue": {"tries": 3}
   }
 }

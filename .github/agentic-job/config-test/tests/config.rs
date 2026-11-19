@@ -583,6 +583,7 @@ const REPOS: &[Repo] = &{
         // Nor is the topic on a fork of another organization.
         Repo { name: "jmarrero-bot/bootc", fork: true, topics: &["bot-midstream"], origin: "" },
         upstream("bootc-dev/bootc"), upstream("composefs/composefs-rs"), upstream("ostreedev/ostree"),
+        upstream("coreos/rpm-ostree"),
         Repo { name: "bootc-dev/homebrew-bcvk", fork: true, topics: &[], origin: "" },
     ]
 };
@@ -1048,7 +1049,7 @@ fn agentic_job_policy_admits_an_unlisted_repository_only_for_the_bots_pull_reque
         return;
     }
     let head = "0".repeat(40);
-    let repo = "ostreedev/ostree";
+    let repo = "coreos/bootupd";
     for file in ["fix.toml", "midstream-fix.toml"] {
         assert!(!repos(file).iter().any(|r| r == repo), "{file} lists {repo}");
         let policy = |author: &str| {
@@ -1331,6 +1332,9 @@ fn the_bounds_admit_each_repository_by_name_or_metadata() {
     const OWNED: [bool; 6] = [true, false, true, false, true, true];
     const MIDSTREAM: [bool; 6] = [false, true, false, true, true, true];
     const NONE: [bool; 6] = [false; 6];
+    // Upstreams jmarrero maintains beside bootc-dev: fixes only, as
+    // upstream has composefs.
+    const MAINTAINED: [bool; 6] = [false, false, true, false, false, false];
     for (repo, expected) in [
         ("jmarrero-forge/tracker", OWNED), ("jmarrero-forge/actions", OWNED),
         ("jmarrero-forge/agenthome", OWNED), ("jmarrero-forge/homegit", OWNED),
@@ -1339,15 +1343,15 @@ fn the_bounds_admit_each_repository_by_name_or_metadata() {
         ("jmarrero-forge/rpm-ostree", MIDSTREAM), ("jmarrero-forge/ostree", MIDSTREAM),
         ("jmarrero-forge/image-builder", MIDSTREAM), ("jmarrero-forge/osbuild", MIDSTREAM),
         ("jmarrero-forge/dracut-x", [false, true, false, false, true, true]),
-        ("jmarrero-forge/systemd", NONE), ("jmarrero-bot/bootc", NONE), ("ostreedev/ostree", NONE),
+        ("jmarrero-forge/systemd", NONE), ("jmarrero-bot/bootc", NONE),
         ("bootc-dev/bootc", [false, false, true, false, true, false]),
         ("bootc-dev/homebrew-bcvk", [false, false, true, false, false, false]),
-        ("composefs/composefs-rs", NONE),
+        ("composefs/composefs-rs", MAINTAINED), ("coreos/rpm-ostree", MAINTAINED), ("ostreedev/ostree", MAINTAINED),
     ] {
         let got = files.map(|file| admits(file, known(repo)));
         assert_eq!(got, expected, "{repo}: {files:?}");
     }
-    assert_eq!(REPOS.len(), 19, "every repository has a row above");
+    assert_eq!(REPOS.len(), 20, "every repository has a row above");
 }
 
 #[test]
@@ -1769,11 +1773,7 @@ fn wrappers_use_the_admitted_pin() {
 #[test]
 fn the_pass_starts_work_only_where_dispatch_and_fix_runs_may_act_on_known_pools() {
     let pass = json_file("../pass.json");
-    // Ours leaves pools and triage unset (wip 0), so absent is empty here.
     let names = |v: &Value, what: &str| -> Vec<String> {
-        if v.is_null() {
-            return vec![];
-        }
         v.as_array()
             .unwrap_or_else(|| panic!("{what} is not an array"))
             .iter()
@@ -1782,8 +1782,10 @@ fn the_pass_starts_work_only_where_dispatch_and_fix_runs_may_act_on_known_pools(
     };
     // Every name in the lists is one REPOS describes, so the loop below sees it.
     for key in ["follow", "workRepositories"] {
-        for repo in names(&pass[key], key) {
-            known(&repo);
+        for entry in pass[key].as_array().expect(key) {
+            if let Some(repo) = entry.as_str() {
+                known(repo);
+            }
         }
     }
     for repo in REPOS {
@@ -1791,11 +1793,14 @@ fn the_pass_starts_work_only_where_dispatch_and_fix_runs_may_act_on_known_pools(
         if covers(&pass["workRepositories"], repo, false) {
             assert!(either(["dispatch.toml", "midstream.toml"]), "{} is scheduled but not in dispatch.toml or midstream.toml", repo.name);
         }
+        // A repository the organization entries add later is followed before
+        // the fix bounds name it; until then the pass's --fix-bounds check
+        // skips its fix rounds.
         if covers(&pass["follow"], repo, false) && !repo.name.ends_with("-x") {
             assert!(either(["fix.toml", "midstream-fix.toml"]), "{} is followed but not in fix.toml or midstream-fix.toml", repo.name);
         }
     }
-    let mut used: Vec<String> = pass["pools"].as_object().map(|p| p.keys().cloned().collect()).unwrap_or_default();
+    let mut used: Vec<String> = pass["pools"].as_object().expect("pass.json's pools").keys().cloned().collect();
     for key in ["planPools", "triagePools"] {
         used.extend(names(&pass[key], key));
     }
@@ -1817,23 +1822,46 @@ fn the_pass_starts_work_only_where_dispatch_and_fix_runs_may_act_on_known_pools(
     assert_eq!(pass["pr"]["reviewWorkflow"], "review.yml");
 }
 
-// Ours (jmarrero-forge/tracker#35, #42): the pass follows our own
-// repositories' pull requests and the midstream forks with the topic, and
-// derives Status, with upstream's caps and the bot's write token when it
-// applies, but starts no board work and plans nothing, and writes nothing
-// unless PASS_APPLY is `enabled`, even when started by hand. promote.yml
-// publishes nothing unless PROMOTE is `enabled`. Each further lane is a
-// pull request that changes this test.
+// Ours (jmarrero-forge/tracker#35, #42): the pass runs upstream's lanes on
+// our own repositories and the midstream forks with the topic, with
+// upstream's caps, the claude pool only, and the bot's write token when it
+// applies. Our own repositories are work repositories by exact name, as
+// dispatch.toml admits them; the organization entry in `follow` makes the
+// pass discover the midstreams, which it adds to the work repositories and
+// never merges in. It follows the upstreams jmarrero maintains, where
+// ownSpaceOnly leaves every merge to him. It writes nothing unless PASS_APPLY is `enabled`, even
+// when started by hand. promote.yml publishes nothing unless PROMOTE is
+// `enabled`. Each lane left off here is a pull request that changes this test.
 #[test]
 fn the_pass_follows_our_repositories_only() {
     let pass = json_file("../pass.json");
     assert_eq!(pass["operator"], "jmarrero");
     assert_eq!(pass["bot"], "jmarrero-bot");
-    assert_eq!(pass["wip"], json!(0));
-    assert_eq!(pass["triage"], json!(false));
-    assert_eq!(pass["follow"], json!(["jmarrero-forge/tracker", "jmarrero-forge/actions"]));
+    assert_eq!(pass["wip"], json!(10));
+    assert_eq!(pass["triage"], json!(true));
+    let org = json!({"org": "jmarrero-forge", "forks": true});
+    assert_eq!(
+        pass["follow"],
+        json!([org.clone(), "jmarrero-forge/actions", "jmarrero-forge/agenthome", "jmarrero-forge/homegit",
+               "bootc-dev/bootc", "composefs/composefs-rs", "coreos/rpm-ostree", "ostreedev/ostree"])
+    );
+    assert_eq!(
+        pass["workRepositories"],
+        json!(["jmarrero-forge/tracker", "jmarrero-forge/actions", "jmarrero-forge/agenthome"])
+    );
+    // As upstream's: a merge in a followed upstream stays the operator's
+    // through ownSpaceOnly, not noMerge.
+    assert_eq!(pass["pr"]["noMerge"], json!([org]));
+    assert_eq!(pass["pr"]["ownSpaceOnly"], json!(true));
+    for key in ["planPools", "triagePools"] {
+        assert_eq!(pass[key], json!(["claude"]), "{key}");
+    }
     assert_eq!(pass["pr"]["fixPools"], json!(["claude"]));
-    for key in ["epics", "pools", "usage", "holds", "maintain", "sessions", "mix"] {
+    assert_eq!(pass["pools"].as_object().expect("pools").keys().collect::<Vec<_>>(), ["claude"]);
+    for key in ["usage", "holds"] {
+        assert_eq!(pass[key]["repository"], "jmarrero-forge/bot-ops", "{key}");
+    }
+    for key in ["maintain", "sessions", "mix"] {
         assert!(pass.get(key).is_none(), "{key}");
     }
     let poll = read("../workflows/poll.yml");
