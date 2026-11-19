@@ -5,6 +5,7 @@
   "dispatchWorkflow": "dispatch.yml",
   "dispatchRef": "main",
   "board": {"owner": "jmarrero-forge", "project": 1},
+  "follow": ["jmarrero-forge/tracker", "jmarrero-forge/actions"],
   "workRepositories": [
     "jmarrero-forge/tracker",
     "jmarrero-forge/bootc",
@@ -15,5 +16,24 @@
     "jmarrero-forge/osbuild"
   ],
   "wip": 0,
-  "triage": false
+  "triage": false,
+  "state": ".state/pass.json",
+  "midstream": {"owner": "jmarrero-forge", "topic": "bot-midstream"},
+  "promote": {
+    "onApproval": true,
+    "publish": true,
+    "signoff": {"name": "Joseph Marrero Corchado", "email": "jmarrero@redhat.com"},
+    "policyRepository": "jmarrero-forge/tracker",
+    "policyPath": "upstream-policy"
+  },
+  "pr": {
+    "staleDays": 0,
+    "reviewWorkflow": "review.yml",
+    "checkReruns": true,
+    "ownerBranches": true,
+    "fixPools": ["claude"],
+    "mergeAuthors": ["dependabot[bot]"],
+    "headOwners": ["jmarrero-bot", "jmarrero-forge"],
+    "rebaseRounds": 2
+  }
 }

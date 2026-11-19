@@ -4,8 +4,85 @@
 # Recipes see their arguments as $1, $2, ...
 set positional-arguments
 
-# Every test of the files under .github.
-test: test-agent-board-install test-config test-poll-bounds test-poll-next agent-board-pin
+# Repository and workflow checks run by CI.
+test: test-runner-profiles test-agent-board-install test-config test-pass-config test-poll-bounds test-poll-next test-pass-state agent-board-pin
+
+# Execute the workflow's actual resolver, without credentials or forge traffic.
+test-runner-profiles:
+    #!/usr/bin/env node
+    const assert = require('node:assert/strict');
+    const fs = require('node:fs');
+    const { spawnSync } = require('node:child_process');
+    const workflow = fs.readFileSync('.github/workflows/dispatch.yml', 'utf8');
+    const gate = workflow.split('\n  runner-gate:\n')[1].split('\n  # Threat:')[0];
+    const script = /          python3 - <<'PY'\n([^]*?)          PY/.exec(gate)[1].replace(/^          /gm, '');
+    const mapPath = '.github/agentic-job/runner-profiles.json';
+    const example = JSON.parse(fs.readFileSync(mapPath));
+    assert.ok(Object.values(example).every(p => p.enabled === false));
+    const name = Object.keys(example)[0], target = change => JSON.stringify({ full_name: 'jmarrero-forge/bootc', owner: { login: 'jmarrero-forge' }, fork: true, topics: ['ci', 'bot-midstream'], ...change });
+    const temp = fs.mkdtempSync(require('node:path').join(require('node:os').tmpdir(), 'runner-profile-'));
+    const env = { RUNNER_PROFILE: name, KIND: 'implement', REPO: 'jmarrero-forge/bootc',
+      POOL: '', EFFORT: '', CONFIG: 'hosted', DETECT_MODEL: 'deployment-model',
+      CALLER_REF: 'refs/heads/main', DEFAULT_BRANCH: 'main', TARGET: target({}) };
+    const run = (map, extra = {}) => {
+      if (map === undefined) fs.rmSync(`${temp}/${mapPath}`, { force: true });
+      else fs.writeFileSync(`${temp}/${mapPath}`, typeof map === 'string' ? map : JSON.stringify(map));
+      return spawnSync('python3', ['-c', script], { cwd: temp, encoding: 'utf8', env: { ...process.env, ...env, ...extra } });
+    };
+    const refuse = (map, extra, reason) => {
+      const result = run(map, extra);
+      assert.notEqual(result.status, 0, reason);
+      assert.ok(result.stderr.includes(reason), result.stderr);
+      assert.equal(result.stdout, '', 'resolver releases no execution selectors');
+    };
+    const enabled = structuredClone(example);
+    enabled[name].enabled = true;
+    try {
+      fs.mkdirSync(`${temp}/.github/agentic-job`, { recursive: true });
+      fs.copyFileSync('.github/agentic-job/midstream.toml', `${temp}/.github/agentic-job/midstream.toml`);
+      for (const map of [undefined, '{', { hosted: {} }]) assert.equal(run(map, { RUNNER_PROFILE: 'hosted' }).status, 0);
+      refuse('{', {}, 'JSONDecodeError');
+      refuse(undefined, {}, 'FileNotFoundError');
+      refuse(example, { RUNNER_PROFILE: 'unknown' }, 'unknown runner');
+      refuse(example, {}, 'disabled');
+      refuse(enabled, {}, 'unimplemented');
+      for (const kind of ['fix', 'review', 'research', 'triage']) refuse(enabled, { KIND: kind }, 'requires implement');
+      for (const [repo, change] of [['jmarrero-forge/tracker', { full_name: 'jmarrero-forge/tracker', fork: false }], ['jmarrero-forge/bootc', { topics: ['bot-fork'] }], ['bootc-dev/bootc', { full_name: 'bootc-dev/bootc', owner: { login: 'bootc-dev' } }], ['jmarrero-forge/bootc', { full_name: 'jmarrero-forge/ostree-x' }]]) refuse(enabled, { REPO: repo, TARGET: target(change) }, 'outside midstream');
+      for (const [key, value, reason] of [['POOL', 'claude', 'pool/effort'], ['EFFORT', 'heavy', 'pool/effort'],
+        ['CONFIG', 'acp-experiment', 'hosted config'], ['DETECT_MODEL', '', 'detection configuration'],
+        ['DETECT_MODEL', '  ', 'detection configuration'], ['CALLER_REF', 'refs/heads/other', 'default branch']]) refuse(enabled, { [key]: value }, reason);
+      for (const change of [p => { delete p.commit; }, p => { p.extra = true; }, p => { p.enabled = 'false'; },
+        p => { p.kvm = 1; }, p => { p.libvirt = 'system'; }, p => { p.libvirt = null; },
+        p => { p.repository = 'https://example/repo'; }, p => { p.workflow = '../agent.yml'; },
+        p => { p.ref = 'main..other'; }, p => { p.inputs.cores = 64; }, p => { p.inputs.task = 'override'; },
+        p => { p.inputs = []; }, p => { p.limits.extra = 1; }, p => { delete p.limits.vcpus; },
+        p => { p.limits['lifetime-minutes'] = 331; }, p => { p.limits['lifetime-minutes'] = 240; }]) {
+        const map = structuredClone(enabled); change(map[name]);
+        refuse(map, { RUNNER_PROFILE: 'unknown' }, 'runner'); // Whole map is validated, not just selected entry.
+        assert.ok(!run(map).stderr.includes('unimplemented'));
+      }
+      for (const pin of ['commit', 'agentic-job', 'actions']) for (const value of ['main', 'a'.repeat(39), 'A'.repeat(40)]) {
+        const map = structuredClone(enabled); map[name][pin] = value; refuse(map, {}, 'immutable');
+      }
+      for (const key of Object.keys(enabled[name].limits)) for (const value of [0, -1, 1.5, true, '1', null]) {
+        const map = structuredClone(enabled); map[name].limits[key] = value; refuse(map, {}, 'positive integers');
+      }
+      for (const badName of ['hosted', 'Bad', '../runner', 'x'.repeat(33)]) refuse({ [badName]: enabled[name] }, {}, 'profile name');
+      for (const map of ['[]', 'null', '{"x":{},"x":{}}']) refuse(map, {}, map.includes('"x"') ? 'duplicate' : 'object');
+      const ceiling = structuredClone(enabled); ceiling[name].limits['lifetime-minutes'] = 330;
+      delete ceiling[name].libvirt;
+      refuse(ceiling, { REPO: 'JMARRERO-FORGE/BOOTC' }, 'unimplemented');
+      assert.match(gate, /if: inputs.runner != 'hosted'/);
+      assert.match(gate, /repository: \$\{\{ github.repository \}\}/);
+      assert.match(gate, /ref: \$\{\{ github.sha \}\}/);
+      assert.doesNotMatch(gate, /inputs.task|secrets\.|actions: write|workflow_dispatch|GITHUB_OUTPUT/);
+      for (const job of ['profile', 'review-gate']) assert.match(workflow, new RegExp(`  ${job}:\\n    needs: runner-gate`));
+      assert.match(workflow, /  run:\n    needs: profile/);
+      assert.match(workflow, /  review:\n    needs: review-gate/);
+      assert.match(workflow, /      runner:\n[^]*?default: hosted/);
+      assert.doesNotMatch(workflow, /runner: \$\{\{ inputs.runner/);
+      console.log('ok runner map validation, hosted bypass and workflow boundary (external execution remains unimplemented)');
+    } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 
 # poll must pass both of the fix bounds files dispatch selects per target.
 test-poll-bounds:
@@ -21,8 +98,9 @@ test-poll-bounds:
 # poll's `next` step script, run with a stub agent-board that prints its
 # arguments: the supervisor and release-train wakes are added only under
 # their variables' gates. Every flag it passes is checked against the
-# pinned CLI's help (AGENT_BOARD), which reads no token. The failure-only
-# fallback uses runner tools and makes just one dispatch attempt.
+# pinned CLI's help (AGENT_BOARD), which reads no token. Best-effort recovery
+# uses runner tools and makes just one dispatch attempt. Fixtures are not
+# live proof of GitHub's missing-job behavior or schedule delivery.
 test-poll-next:
     #!/usr/bin/env node
     const assert = require('node:assert/strict');
@@ -39,10 +117,10 @@ test-poll-next:
     fs.mkdirSync(path.dirname(stub), { recursive: true });
     fs.writeFileSync(stub, '#!/bin/sh\nprintf "%s\\n" "$@"\n', { mode: 0o755 });
     const run = (env) => execFileSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', script], {
-      env: { PATH: process.env.PATH, RUNNER_TEMP: temp, DEFAULT_BRANCH: 'main', SUPERVISOR: '', RELEASE_TRAIN: '', ...env },
+      env: { PATH: process.env.PATH, RUNNER_TEMP: temp, DEFAULT_BRANCH: 'main', GITHUB_RUN_ID: '42', SUPERVISOR: '', RELEASE_TRAIN: '', ...env },
     }).toString().trimEnd().split('\n');
     const base = ['pass', 'next', '--workflow', 'poll.yml', '--branch', 'main', '--input', 'apply=true',
-      '--apply-title', 'pass (apply)', '--wait-minutes', '10'];
+      '--input', 'previous_run_id=42', '--apply-title', 'pass (apply)', '--wait-minutes', '10'];
     const supervisor = ['--supervisor-workflow', 'supervisor.yml', '--supervisor-stale-minutes', '30',
       '--supervisor-input', 'prompt=', '--supervisor-input', 'session=false'];
     const train = ['--train-workflow', 'release-train.yml', '--train-stale-minutes', '60'];
@@ -70,16 +148,27 @@ test-poll-next:
     }
     const fallback = /^ {2}next-fallback:\n([\s\S]+)$/m.exec(poll)?.[1];
     assert.ok(fallback, 'the final fallback job');
-    assert.match(fallback, /^ {4}needs: next$/m);
-    const gate = /^ {4}if: \$\{\{ (.*) \}\}$/m.exec(fallback)[1];
-    for (const result of ['success', 'failure', 'cancelled', 'skipped']) {
+    assert.match(fallback, /^ {4}needs: \[pass, next\]$/m);
+    const gate = /^ {4}if: >-\n((?: {6}.*\n)+)/m.exec(fallback)[1].trim().replace(/^\$\{\{ | \}\}$/g, '');
+    for (const result of ['success', 'failure', 'cancelled', 'skipped', '']) {
+      for (const pass of ['success', 'failure', 'cancelled', 'skipped', '']) {
       for (const cancelled of [false, true]) {
         for (const apply of ['', 'enabled', 'disabled']) {
+          for (const event of ['schedule', 'workflow_dispatch', 'push']) {
+          for (const applying of [false, true]) {
+          for (const ref of ['refs/heads/main', 'refs/heads/other', 'refs/tags/main']) {
           const got = require('node:vm').runInNewContext(gate, {
-            cancelled: () => cancelled, needs: { next: { result } }, vars: { PASS_APPLY: apply },
+            cancelled: () => cancelled, needs: { pass: { result: pass }, next: { result } }, vars: { PASS_APPLY: apply },
+            github: { ref, event_name: event, event: { repository: { default_branch: 'main' } } },
+            inputs: { apply: applying }, format: (template, branch) => template.replace('{0}', branch),
           });
-          assert.equal(got, result === 'failure' && !cancelled && apply === 'enabled');
+          assert.equal(got, ['failure', 'skipped', ''].includes(result) && pass !== 'cancelled' && !cancelled &&
+            apply === 'enabled' && ref === 'refs/heads/main' && (event === 'schedule' || (event === 'workflow_dispatch' && applying)));
+          }
+          }
+          }
         }
+      }
       }
     }
     assert.match(fallback, /^ {4}timeout-minutes: 12$/m);
@@ -88,35 +177,265 @@ test-poll-next:
     assert.equal((fallback.match(/^ {6}- /gm) ?? []).length, 1, 'one step without setup');
     assert.match(fallback, /^ {10}GH_TOKEN: \$\{\{ github.token \}\}$/m);
     assert.match(fallback, /^ {10}DEFAULT_BRANCH: \$\{\{ github.event.repository.default_branch \}\}$/m);
+    for (const job of ['PASS', 'NEXT']) assert.ok(fallback.includes(`${job}_RESULT: \u0024{` + `{ needs.${job.toLowerCase()}.result }}`));
     const recovery = /^ {8}run: \|\n((?: {10}.*\n)+)/m.exec(fallback)[1].replace(/^ {10}/gm, '');
     const sandbox = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'poll-fallback-'));
     try {
-      fs.writeFileSync(path.join(sandbox, 'gh'), '#!/bin/bash\nif [[ $1 == api ]]; then printf "%s\\n" "$*" >&2; printf "2026-11-02T17:51:00Z\\n"; exit "${API_EXIT:-0}"; fi\nprintf "%s\\n" "$*"\nexit "${DISPATCH_EXIT:-0}"\n', { mode: 0o755 });
+      fs.writeFileSync(path.join(sandbox, 'gh'), `#!${process.execPath}
+    const args = process.argv.slice(2);
+    require('node:fs').appendFileSync(process.env.CALLS, JSON.stringify(args) + '\\n');
+    if (args[0] === 'api') {
+      const listing = args.includes('--method');
+      if (process.env.API_FAIL === (listing ? 'list' : 'start')) { console.error('fixture API failure'); process.exit(1); }
+      process.stdout.write(listing ? (process.env[args.includes('page=2') ? 'PAGE2' : 'RUNS']) : (process.env.START || '2026-11-02T17:51:00Z'));
+    } else { console.log(args.join(' ')); process.exit(Number(process.env.DISPATCH_EXIT || 0)); }
+    `, { mode: 0o755 });
       fs.writeFileSync(path.join(sandbox, 'date'), '#!/bin/bash\nif [[ $1 == -d ]]; then printf "1000\\n"; else printf "%s\\n" "$NOW"; fi\n', { mode: 0o755 });
       fs.writeFileSync(path.join(sandbox, 'sleep'), '#!/bin/bash\nprintf "sleep %s\\n" "$*"\n', { mode: 0o755 });
-      const api = 'api repos/owner/repo/actions/runs/42 --jq .run_started_at';
-      const dispatch = 'workflow run poll.yml --repo owner/repo --ref main -f apply=true';
-      const recover = (env) => require('node:child_process').spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', recovery], {
-        env: { PATH: `${sandbox}:${process.env.PATH}`, GITHUB_REPOSITORY: 'owner/repo', GITHUB_RUN_ID: '42', DEFAULT_BRANCH: 'main', ...env }, encoding: 'utf8',
-      });
+      const dispatch = 'workflow run poll.yml --repo owner/repo --ref main -f apply=true -f previous_run_id=42';
+      const me = { id: 42, created_at: '2026-11-02T17:51:00Z', head_branch: 'main', event: 'workflow_dispatch', display_title: 'pass (apply)', status: 'in_progress' };
+      const rows = runs => JSON.stringify({ workflow_runs: runs });
+      const log = 'Recovery dependencies: pass=<> next=<skipped>';
+      const callsPath = path.join(sandbox, 'calls');
+      const recover = (env = {}) => {
+        fs.writeFileSync(callsPath, '');
+        return require('node:child_process').spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', recovery], {
+          env: { PATH: `${sandbox}:${process.env.PATH}`, GITHUB_REPOSITORY: 'owner/repo', GITHUB_RUN_ID: '42', DEFAULT_BRANCH: 'main',
+            PASS_RESULT: '', NEXT_RESULT: 'skipped', CALLS: callsPath, NOW: '1900', RUNS: rows([me]), ...env }, encoding: 'utf8',
+        });
+      };
+      const calls = () => fs.readFileSync(callsPath, 'utf8').trim().split('\n').map(JSON.parse);
       for (const [now, delay] of [['1120', '480'], ['1600', null], ['1900', null], ['900', '600']]) {
         const got = recover({ NOW: now });
         assert.equal(got.status, 0, got.stderr);
-        assert.equal(got.stderr.trimEnd(), api);
-        assert.deepEqual(got.stdout.trimEnd().split('\n'), [...(delay ? [`sleep ${delay}`] : []), dispatch]);
+        assert.deepEqual(got.stdout.trimEnd().split('\n'), [log, ...(delay ? [`sleep ${delay}`] : []), dispatch]);
+        assert.deepEqual(calls().at(-1), dispatch.split(' '));
+        assert.equal(calls().length, 3);
       }
       const failed = recover({ NOW: '1900', DISPATCH_EXIT: '1' });
       assert.equal(failed.status, 1, 'dispatch failure stays visible');
-      assert.equal(failed.stderr.trimEnd(), api);
-      assert.deepEqual(failed.stdout.trimEnd().split('\n'), [dispatch], 'no retry on failure');
-      const unreadable = recover({ NOW: '1900', API_EXIT: '1' });
-      assert.equal(unreadable.status, 1);
-      assert.equal(unreadable.stderr.trimEnd(), api);
-      assert.equal(unreadable.stdout, '', 'API failure stops recovery');
+      assert.deepEqual(failed.stdout.trimEnd().split('\n'), [log, dispatch], 'no retry on failure');
+      assert.equal(calls().filter(args => args[0] === 'workflow').length, 1);
+      for (const env of [{ API_FAIL: 'start' }, { API_FAIL: 'list' }, { START: 'null' }, { RUNS: '{}' }, { RUNS: '{' },
+        { RUNS: rows([]) }, { RUNS: rows([{ ...me, status: null }]) }, { RUNS: rows([{ ...me, created_at: 'invalid' }]) }]) {
+        const unreadable = recover(env);
+        assert.notEqual(unreadable.status, 0, JSON.stringify(env));
+        assert.ok(unreadable.stderr, 'failure stays visible');
+        assert.equal(unreadable.stdout.trimEnd(), log, 'API failure stops recovery');
+        assert.ok(calls().every(args => args[0] === 'api'));
+      }
+      const newer = { ...me, id: 43 };
+      for (const status of ['queued', 'waiting', 'pending', 'requested', 'in_progress']) {
+        for (const event of ['schedule', 'workflow_dispatch']) {
+          const got = recover({ RUNS: rows([{ ...newer, status, event }, me]) });
+          assert.equal(got.status, 0, got.stderr);
+          assert.match(got.stdout, /run 43 continues the chain/);
+          assert.equal(calls().length, 2, 'no dispatch for newer active applying run');
+        }
+      }
+      for (const other of [{ ...newer, status: 'completed' }, { ...newer, head_branch: 'other' },
+        { ...newer, display_title: 'pass' }, { ...newer, event: 'push' }, { ...me, id: 41 },
+        { ...newer, created_at: '2026-11-02T17:50:59Z' }]) {
+        const got = recover({ RUNS: rows([other, me]) });
+        assert.equal(got.status, 0, got.stderr);
+        assert.match(got.stdout, /workflow run poll.yml/);
+      }
+      const full = Array.from({ length: 100 }, (_, i) => ({ ...newer, id: 100 + i, status: 'completed' }));
+      assert.equal(recover({ RUNS: rows(full), PAGE2: rows([me]) }).status, 0);
+      assert.equal(calls().length, 4, 'second page reaches current run before dispatch');
+      assert.notEqual(recover({ RUNS: rows(full), PAGE2: rows(full) }).status, 0);
+      assert.equal(calls().length, 3, 'bounded at two pages; no blind dispatch');
     } finally {
       fs.rmSync(sandbox, { recursive: true, force: true });
     }
-    console.log('ok poll fallback is failure-only, waits at most ten minutes and dispatches once');
+    console.log('ok offline fallback guards, dependency fixtures, bounded wait/listing, newer-run ownership and visible API failures; not live GitHub proof');
+
+# Offline state provenance, public-only export and workflow plumbing.
+test-pass-state:
+    #!/usr/bin/env node
+    const assert = require('node:assert/strict');
+    const fs = require('node:fs');
+    const source = /^pass-state mode:\n((?:    .*\n|\n)+)/m.exec(fs.readFileSync('Justfile', 'utf8'))[1].replace(/^    /gm, '');
+    const functions = {};
+    new Function('require', 'process', 'exports', source.replace(/^#!.*\n/, ''))(require, { argv: ['node', 'recipe', 'test'] }, functions);
+    const { validate, publicStates } = functions;
+    const env = { PREVIOUS_RUN_ID: '41', GITHUB_RUN_ID: '42', GITHUB_REPOSITORY: 'owner/tracker', DEFAULT_BRANCH: 'main' };
+    const run = { id: 41, workflow_id: 123, path: '.github/workflows/poll.yml',
+      repository: { full_name: env.GITHUB_REPOSITORY }, head_repository: { full_name: env.GITHUB_REPOSITORY },
+      head_branch: 'main', event: 'workflow_dispatch', display_title: 'pass (apply)' };
+    const jobs = { total_count: 2, jobs: [{ name: 'pass', status: 'completed', conclusion: 'success' },
+      { name: 'next', status: 'in_progress' }] };
+    function predecessor(change = {}, jobChange = {}, extra = {}) {
+      const calls = [];
+      const id = validate({ ...env, ...extra }, endpoint => {
+        calls.push(endpoint);
+        assert.ok(calls.length <= 3);
+        if (endpoint.endsWith('/workflows/poll.yml')) return { id: 123 };
+        if (endpoint.endsWith('/jobs?filter=latest&per_page=100')) return { ...jobs, ...jobChange };
+        assert.equal(endpoint, 'repos/owner/tracker/actions/runs/41');
+        return { ...run, ...change };
+      });
+      return { id, calls };
+    }
+    assert.equal(predecessor().id, '41');
+    assert.equal(predecessor({ event: 'schedule', display_title: 'pass' }).id, '41');
+    assert.equal(predecessor({}, { jobs: [{ ...jobs.jobs[0], conclusion: 'failure' }], total_count: 1 }).id, '41');
+    for (const change of [{ workflow_id: 124 }, { id: 40 }, { path: '.github/workflows/other.yml' },
+      { repository: { full_name: 'other/tracker' } }, { head_repository: { full_name: 'fork/tracker' } },
+      { head_branch: 'feature' }, { event: 'pull_request' }, { event: 'push' }, { display_title: 'pass' }]) {
+      assert.equal(predecessor(change).id, '', JSON.stringify(change));
+    }
+    for (const change of [{ total_count: 101 }, { jobs: [] }, { jobs: null },
+      { jobs: [jobs.jobs[0], jobs.jobs[0]] },
+      ...['in_progress', 'queued'].map(status => ({ total_count: 1, jobs: [{ ...jobs.jobs[0], status }] })),
+      ...['cancelled', 'skipped', null].map(conclusion => ({ total_count: 1, jobs: [{ ...jobs.jobs[0], conclusion }] }))]) {
+      assert.equal(predecessor({}, change).id, '', JSON.stringify(change));
+    }
+    for (const id of ['42', '0', '-1', '../41', '41;exit', '1'.repeat(21)]) {
+      assert.deepEqual(predecessor({}, {}, { PREVIOUS_RUN_ID: id }), { id: '', calls: [] });
+    }
+    const tests = fs.readFileSync('.github/workflows/ci.yml', 'utf8').split('      - name: Test pass state export\n')[1];
+    new Function('require', tests.split('        run: |\n')[1].split('      - run: just test\n')[0].replace(/^          /gm, ''))(require);
+
+# Public cache and durable status handoff. Never print bodies or API diagnostics.
+pass-state mode:
+    #!/usr/bin/env node
+    const fs = require('node:fs');
+    const { execFileSync } = require('node:child_process');
+    const STATE = '.state/pass.json';
+    const LIVING = '.state/living-status.json';
+    const MAX_BYTES = 32 * 1024 * 1024; // The pinned pass's state-file limit.
+    const MAX_REPOSITORIES = 100;
+    function api(endpoint, timeout = 20000) {
+      return JSON.parse(execFileSync('gh', ['api', endpoint], {
+        timeout, maxBuffer: MAX_BYTES, stdio: ['ignore', 'pipe', 'pipe'],
+      }));
+    }
+    function validate(env = process.env, get = api) {
+      let id = env.PREVIOUS_RUN_ID;
+      const root = `repos/${env.GITHUB_REPOSITORY}/actions`;
+      if (!id) {
+        // Bootstrap/schedule use the same provenance gate as explicit dispatches.
+        // Bound discovery; never accept an artifact merely because its name fits.
+        const listed = get(`${root}/workflows/poll.yml/runs?branch=${encodeURIComponent(env.DEFAULT_BRANCH)}&per_page=100`).workflow_runs;
+        if (!Array.isArray(listed) || listed.length > 100) throw new Error('invalid run listing');
+        const previous = listed.filter(run => /^[1-9][0-9]{0,19}$/.test(String(run.id)) &&
+          BigInt(run.id) < BigInt(env.GITHUB_RUN_ID) && run.head_branch === env.DEFAULT_BRANCH &&
+          (run.event === 'schedule' || (run.event === 'workflow_dispatch' && run.display_title === 'pass (apply)')) &&
+          run.conclusion !== 'cancelled').sort((a, b) => BigInt(a.id) > BigInt(b.id) ? -1 : 1)[0];
+        if (!previous) return '';
+        id = String(previous.id);
+      }
+      // Input is data, never a URL/path or shell fragment.
+      if (!/^[1-9][0-9]{0,19}$/.test(id) || id === env.GITHUB_RUN_ID) return '';
+      const run = get(`${root}/runs/${id}`);
+      const workflow = get(`${root}/workflows/poll.yml`);
+      if (String(run.id) !== id || run.workflow_id !== workflow.id ||
+          run.path !== '.github/workflows/poll.yml' ||
+          run.repository?.full_name !== env.GITHUB_REPOSITORY ||
+          run.head_repository?.full_name !== env.GITHUB_REPOSITORY ||
+          run.head_branch !== env.DEFAULT_BRANCH ||
+          !(run.event === 'schedule' ||
+            (run.event === 'workflow_dispatch' && run.display_title === 'pass (apply)'))) return '';
+      // The next job may still be running. Require the state-writing job, not
+      // the whole workflow, to have finished. Refuse truncated job listings.
+      const jobs = get(`${root}/runs/${id}/jobs?filter=latest&per_page=100`);
+      if (!Array.isArray(jobs.jobs) || jobs.total_count !== jobs.jobs.length ||
+          jobs.jobs.length > 100) return '';
+      const passes = jobs.jobs.filter(job => job.name === 'pass');
+      return passes.length === 1 && passes[0].status === 'completed' &&
+        ['success', 'failure'].includes(passes[0].conclusion) ? id : '';
+    }
+    function publicStates(state, living, get = api) {
+      const issueRepository = key => /^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#[1-9][0-9]*$(?![\s\S])/.exec(key)?.[1].toLowerCase();
+      if (living !== null) {
+        if (living?.schema !== 'agent-board/status/v1' || typeof living.bot !== 'string' ||
+            !living.entries || typeof living.entries !== 'object' || Array.isArray(living.entries) ||
+            Object.keys(living).some(key => !['schema', 'bot', 'entries'].includes(key)) ||
+            Object.keys(living.entries).some(key => !issueRepository(key))) throw new Error('invalid status ledger');
+      }
+      // Both caches contain PAT-authenticated bodies. A public repository alone
+      // is not enough: reviews can include the viewer's unpublished PENDING body.
+      // Allow only public issue/PR lists/details, issue comments and label lists.
+      // Timelines can embed private cross-references. Every other endpoint stays
+      // cold. Match the entire raw
+      // path, without URL normalization accepting extra/dot/encoded segments.
+      const repository = url => /^https:\/\/api\.github\.com\/repos\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/(?:issues(?:\/[1-9][0-9]*(?:\/(?:comments|labels))?|\/comments\/[1-9][0-9]*)?|pulls(?:\/[1-9][0-9]*)?|labels)(?:\?[^#\s]*)?$(?![\s\S])/
+        .exec(url)?.[1].toLowerCase();
+      const caches = ['responses', 'pass_responses'];
+      const repositories = new Set([...caches.flatMap(key => Object.keys(state[key] || {}).map(repository).filter(Boolean)),
+        ...Object.keys(living?.entries || {}).map(issueRepository)]);
+      if (repositories.size > MAX_REPOSITORIES) throw new Error('too many repositories');
+      const publicRepos = new Set();
+      const ledgerRepos = new Set(Object.keys(living?.entries || {}).map(issueRepository));
+      const deadline = Date.now() + 90000;
+      for (const repo of repositories) {
+        if (Date.now() >= deadline) throw new Error('metadata deadline');
+        try {
+          const metadata = get(`repos/${repo}`, Math.min(10000, deadline - Date.now()));
+          if (metadata.full_name?.toLowerCase() === repo && metadata.private === false && metadata.visibility === 'public') {
+            publicRepos.add(repo);
+          } else if (ledgerRepos.has(repo) && !(metadata.full_name?.toLowerCase() === repo &&
+              metadata.private === true && ['private', 'internal'].includes(metadata.visibility))) throw new Error('unverified ledger repository');
+        } catch { if (ledgerRepos.has(repo)) throw new Error('cannot verify ledger visibility'); }
+      }
+      // Cursors/intake/maintenance metadata can also name private repositories.
+      // Publish only the response-cache envelope, not arbitrary state fields.
+      const exported = { schema: 'agent-board/poll-state/v1',
+        interval_seconds: Number.isSafeInteger(state.interval_seconds) ? state.interval_seconds : 300 };
+      for (const key of caches) {
+        // Drop entries whole: changing a body would invalidate its cached ETag.
+        exported[key] = Object.fromEntries(Object.entries(state[key] || {}).filter(([url]) => publicRepos.has(repository(url))));
+      }
+      // Keep public entries whole: redacting records breaks their replay hashes.
+      // The original ledger stays intact; only the public copy drops private entries.
+      const ledger = living === null ? null : { schema: living.schema, bot: living.bot,
+        entries: Object.fromEntries(Object.entries(living.entries).filter(([key]) => publicRepos.has(issueRepository(key)))) };
+      return { state: exported, living: ledger };
+    }
+    if (process.argv[2] === 'validate') {
+      let id = '';
+      try { id = validate(); } catch { /* Missing provenance starts cold. */ }
+      fs.appendFileSync(process.env.GITHUB_OUTPUT, `run-id=${id}\n`);
+      console.log(id ? `Validated predecessor ${id}` : 'No trusted predecessor; starting cold');
+    } else if (process.argv[2] === 'export') {
+      fs.rmSync('.state/public', { recursive: true, force: true });
+      const paths = [STATE, LIVING];
+      if (paths.some(path => fs.existsSync(path))) {
+        try {
+          const read = (path, limit) => {
+            if (!fs.existsSync(path)) return null;
+            try {
+              if (fs.statSync(path).size > limit) throw new Error('oversized state');
+              const value = JSON.parse(fs.readFileSync(path, 'utf8'));
+              if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid state');
+              return value;
+            } catch {
+              // A corrupt disposable cache must not discard valid replay guards.
+              if (path === LIVING) throw new Error('unreadable ledger');
+              fs.rmSync(path, { force: true });
+              console.log('Discarded an unreadable state file');
+              return null;
+            }
+          };
+          const state = read(STATE, MAX_BYTES);
+          const living = read(LIVING, 4 * 1024 * 1024);
+          const exported = publicStates(state || {}, living);
+          fs.mkdirSync('.state/public', { recursive: true });
+          if (state !== null) fs.writeFileSync('.state/public/pass.json', JSON.stringify(exported.state) + '\n');
+          if (living !== null) fs.writeFileSync('.state/public/living-status.json', JSON.stringify(exported.living) + '\n');
+          console.log('Prepared public response cache for the next pass');
+        } catch {
+          fs.rmSync('.state/public', { recursive: true, force: true });
+          console.error('Could not prepare public state; original ledger retained; refusing export');
+          process.exitCode = 1;
+        }
+      }
+    } else if (process.argv[2] === 'test') {
+      Object.assign(exports, { validate, publicStates });
+    } else {
+      throw new Error('expected validate or export');
+    }
 
 # The one agent-board commit every workflow pins as `  AGENT_BOARD_REV:`,
 # printed; fails when the workflows pin different revisions, or none, so a
@@ -137,8 +456,39 @@ agent-board-pin:
 test-config:
     cargo test --locked --manifest-path .github/agentic-job/config-test/Cargo.toml --target-dir "{{ env('CARGO_TARGET_DIR', cache_directory() / 'tracker-config-test') }}"
 
+# pass.json and the fix bounds poll.yml passes, through the pinned binary's
+# `pass --check-config` (agent-board#756), which reads only the org listing: a
+# setting the pass refuses would otherwise fail every pass after the merge
+# (#1403). It runs on every pull request, so a pin move that tightens the
+# checks is caught too. The pin is the poll's: agent-board-pin keeps one.
+test-pass-config:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -z ${AGENT_BOARD:-} ]]; then echo 'skipped: set AGENT_BOARD to the built binary'; exit 0; fi
+    "$AGENT_BOARD" pass --check-config --config .github/pass.json \
+      --fix-bounds .github/agentic-job/fix.toml --fix-bounds .github/agentic-job/midstream-fix.toml
+
 # No moving refs or source fallback: substituted assets must not run with the
 # bot's write token. The attested manifest binds both digests to reviewed CI.
+select-agent-board rev branch='main':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rev=$1 branch=$2 repo=cgwalters-forge/agent-board
+    [[ $rev == latest || $rev =~ ^[0-9a-f]{40}$ ]] || { echo 'expected pinned revision' >&2; exit 1; }
+    branch=$(jq -rn --arg b "$branch" '$b | @uri')
+    runs=$(timeout 20 gh api "repos/$repo/actions/workflows/ci.yml/runs?branch=$branch&event=push&status=success&per_page=100&head_sha=${rev/latest/}")
+    commits=$(if [[ $rev == latest ]]; then timeout 20 gh api "repos/$repo/commits?sha=$branch&per_page=100" | jq -c '[.[].sha]'; else jq -nc --arg sha "$rev" '[$sha]'; fi)
+    candidates=$(jq -c --arg branch "$2" --argjson commits "$commits" '[ $commits[] as $sha | .workflow_runs[] | select(.head_sha == $sha and .head_branch == $branch and .event == "push" and .status == "completed" and .conclusion == "success" and .path == ".github/workflows/ci.yml") | {sha:$sha, run:.id} ]' <<< "$runs")
+    listings=0
+    while read -r candidate; do
+      (( listings += 1 )); [[ $listings -le 30 ]] || { echo 'agent-board artifact discovery exceeded 30 runs' >&2; exit 1; }
+      run=$(jq -er '.run | select(type == "number" and . > 0 and . <= 9007199254740991 and floor == .)' <<< "$candidate")
+      count=$(timeout 20 gh api "repos/$repo/actions/runs/$run/artifacts?per_page=100" | jq -er '[.artifacts[] | select(.name == "agent-board-main" and .expired == false)] | length')
+      [[ $count -le 1 ]] || { echo 'ambiguous agent-board-main artifact' >&2; exit 1; }
+      if [[ $count == 1 ]]; then echo "$candidate"; exit 0; fi
+    done < <(jq -c '.[]' <<< "$candidates")
+    echo null
+
 build-agent-board rev=env("AGENT_BOARD_REV", ""):
     #!/usr/bin/env bash
     set -euo pipefail
@@ -152,8 +502,15 @@ build-agent-board rev=env("AGENT_BOARD_REV", ""):
     rm -f "$dest/agent-board"
     stage=$(mktemp -d "$RUNNER_TEMP/agent-board-download.XXXXXX")
     trap 'rm -rf "$stage"' EXIT
-    timeout 180 gh release download "$tag" --repo "$repo" --dir "$stage" \
-      --pattern "*-$target" --pattern SHA256SUMS --pattern release.json --pattern provenance.jsonl
+    selected=$({{ just_executable() }} select-agent-board "$rev")
+    if [[ $selected != null ]]; then
+      run=$(jq -er .run <<< "$selected")
+      timeout 180 gh run download "$run" --repo "$repo" --name agent-board-main --dir "$stage"
+      tag=''
+    else
+      timeout 180 gh release download "$tag" --repo "$repo" --dir "$stage" \
+        --pattern "*-$target" --pattern SHA256SUMS --pattern release.json --pattern provenance.jsonl
+    fi
     GH_TOKEN='' GITHUB_TOKEN='' timeout 180 gh attestation verify "$stage/release.json" \
       --bundle "$stage/provenance.jsonl" --repo "$repo" \
       --cert-identity "https://github.com/$repo/.github/workflows/ci.yml@refs/heads/main" \
@@ -168,62 +525,9 @@ build-agent-board rev=env("AGENT_BOARD_REV", ""):
     echo "rev=$rev" >> "${GITHUB_OUTPUT:-/dev/null}"
     echo "Installed agent-board $rev ($target)"
 
-# Offline transport fixtures exercise the real installer; no network or token.
+# Offline installer probes live with the other config-test transport fixtures.
 test-agent-board-install:
-    #!/usr/bin/env node
-    const assert = require('node:assert/strict');
-    const fs = require('node:fs');
-    const os = require('node:os');
-    const path = require('node:path');
-    const { spawnSync } = require('node:child_process');
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-board-install-'));
-    const rev = 'a'.repeat(40);
-    const target = 'x86_64-unknown-linux-musl';
-    const stub = `#!/usr/bin/env node
-    const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto');
-    const args = process.argv.slice(2), mode = process.env.CASE;
-    if (args[0] === 'attestation') {
-      if (process.env.GH_TOKEN || process.env.GITHUB_TOKEN) process.exit(9);
-      for (const s of ['--source-digest', '${rev}', '--deny-self-hosted-runners', 'https://github.com/cgwalters-forge/agent-board/.github/workflows/ci.yml@refs/heads/main']) if (!args.includes(s)) process.exit(8);
-      process.exit(mode === 'attestation' ? 1 : 0);
-    }
-    if (['missing-release', 'download'].includes(mode)) process.exit(1);
-    const d = args[args.indexOf('--dir') + 1];
-    let sums = '';
-    for (const n of ['agent-board', 'gh-agent-board']) {
-      const name = n + '-${target}', data = '#!/bin/sh\\nexit 0\\n';
-      fs.writeFileSync(path.join(d, name), data);
-      sums += crypto.createHash('sha256').update(data).digest('hex') + '  ' + name + '\\n';
-    }
-    fs.writeFileSync(path.join(d, 'SHA256SUMS'), mode === 'sums' ? 'bad' : sums);
-    fs.writeFileSync(path.join(d, 'release.json'), JSON.stringify({schema: 'agent-board.release.v1', repository: 'cgwalters-forge/agent-board', tag: 'build-${rev}', commit: mode === 'commit' ? 'b'.repeat(40) : '${rev}', target: '${target}', sha256sums: sums}));
-    fs.writeFileSync(path.join(d, 'provenance.jsonl'), 'fixture');
-    if (mode === 'integrity') fs.appendFileSync(path.join(d, 'agent-board-${target}'), 'tampered');
-    if (mode === 'missing-asset') fs.unlinkSync(path.join(d, 'agent-board-${target}'));
-    `;
-    try {
-      fs.writeFileSync(path.join(dir, 'gh'), stub, {mode: 0o755});
-      fs.writeFileSync(path.join(dir, 'uname'), '#!/bin/sh\nif [ "$CASE" = platform ]; then printf Darwin; else /usr/bin/uname "$@"; fi\n', {mode: 0o755});
-      for (const mode of ['ok', 'missing-release', 'missing-asset', 'platform', 'download', 'attestation', 'commit', 'sums', 'integrity', 'revision']) {
-        const temp = fs.mkdtempSync(path.join(dir, 'run-'));
-        const output = path.join(temp, 'output');
-        const result = spawnSync('{{ just_executable() }}', ['build-agent-board', mode === 'revision' ? '' : rev], {encoding: 'utf8', env: {...process.env, PATH: `${dir}:${process.env.PATH}`, RUNNER_TEMP: temp, GITHUB_OUTPUT: output, GH_TOKEN: '', GITHUB_TOKEN: '', CASE: mode}});
-        assert.equal(result.status === 0, mode === 'ok', `${mode}: ${result.stdout}\n${result.stderr}`);
-        assert.equal(fs.existsSync(path.join(temp, 'agent-board/bin/agent-board')), mode === 'ok', mode);
-        if (mode === 'ok') assert.equal(fs.readFileSync(output, 'utf8'), `rev=${rev}\n`);
-        else assert.equal(fs.existsSync(output), false, mode);
-        console.log(`ok agent-board installer: ${mode}`);
-      }
-      const pins = fs.mkdtempSync(path.join(dir, 'pins-'));
-      fs.mkdirSync(path.join(pins, '.github/workflows'), {recursive: true});
-      fs.copyFileSync('Justfile', path.join(pins, 'Justfile'));
-      const checkPin = () => spawnSync('{{ just_executable() }}', ['agent-board-pin'], {cwd: pins, encoding: 'utf8'});
-      fs.writeFileSync(path.join(pins, '.github/workflows/a.yml'), `env:\n  AGENT_BOARD_REV: ${rev}\n`);
-      assert.equal(checkPin().stdout.trim(), rev);
-      fs.writeFileSync(path.join(pins, '.github/workflows/b.yml'), `env:\n  AGENT_BOARD_REV: ${'b'.repeat(40)}\n`);
-      assert.notEqual(checkPin().status, 0);
-      console.log('ok agent-board pin agreement and mismatch');
-    } finally { fs.rmSync(dir, {recursive: true, force: true}); }
+    JUST_BIN="{{ just_executable() }}" cargo test --locked --manifest-path .github/agentic-job/config-test/Cargo.toml --target-dir "{{ env('CARGO_TARGET_DIR', cache_directory() / 'tracker-config-test') }}" agent_board_
 
 # The shared workflow check that ci.yml's lint job calls, run locally from
 # a checkout of the forge's actions repository (its lint/README.md), the

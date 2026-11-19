@@ -3,14 +3,19 @@
 # is our wrapper's, jmarrero-forge/actions' cgwalters-agentic-job.yml: it
 # carries the agentic-job pin, the tailnet join, the inference proxy, the
 # runner and the model. This file keeps what is this repository's: the
-# trigger and its five inputs, the run name, the concurrency, the
+# trigger and its inputs, the run name, the concurrency, the
 # environment that gates apply and which secret is the apply token; the
 # bounds are in .github/agentic-job (dispatch.toml, comment.toml for
-# `triage` and `research`, fix.toml for `fix`, midstream.toml and
+# `triage` and `research`, recovery.toml for a triage of a pull request,
+# session.toml for `session`, fix.toml for `fix`, midstream.toml and
 # midstream-fix.toml in their place for a midstream fork) and
 # the runner configuration in hosted.toml there, the wrapper's default paths.
 # The `pool` input picks the agent and model from the closed set in pools.json
-# there; empty leaves them to the repository variables AGENT and AGENT_MODEL.
+# there; empty leaves them to the repository variables AGENT and AGENT_MODEL,
+# except for `session`, whose long whole-repository run takes the claude pool
+# then; the pass names the pool of the sessions it starts.
+# Optional effort=heavy changes only that pool's model; an inherited pool
+# must match AGENT/AGENT_MODEL uniquely. No guessed deployment-model default.
 # The `config` input picks the runner configuration from a closed set too:
 # `hosted` leaves the wrapper's default, `acp-experiment` is the child-agent
 # experiment's acp-experiment.toml there.
@@ -18,11 +23,13 @@
 # `profile` job puts it before the task, so a dispatch carries only what is
 # particular to its item. The wrapper adds its own line on top, which says
 # what the kind may hand back.
-# Unlike upstream's, the wrapper is pinned by commit: jmarrero's broker
-# admits a run by its wrapper's commit, so the pin moves with that
-# admission. It sets the agentic-job ref.
+# Both calls pin our wrapper at one commit, the one jmarrero's broker
+# admits (agentic-job v0.6.15, whose policy reads the bounds' organization
+# rules); upstream pins its review call at an older wrapper. Review is a
+# separate call: its wrapper owns REVIEW_POOLS, base policy/config and
+# checked submission.
 name: dispatch
-run-name: ${{ inputs.kind }} ${{ inputs.repo }}#${{ inputs.item }}${{ inputs.pool && format(' ({0})', inputs.pool) || '' }}${{ inputs.config == 'acp-experiment' && ' [acp-experiment]' || '' }}
+run-name: ${{ inputs.kind }} ${{ inputs.repo }}#${{ inputs.item }}${{ inputs.kind == 'review' && format(' {0} ({1})', inputs.head, inputs.pool) || (inputs.pool && format(' ({0})', inputs.pool) || '') }}${{ inputs.kind != 'review' && inputs.config == 'acp-experiment' && ' [acp-experiment]' || '' }}
 
 on:
   workflow_dispatch:
@@ -35,17 +42,31 @@ on:
         description: Public target repository, OWNER/NAME, allowed by the bounds
         type: string
         required: true
+      issue_repo:
+        description: "Optional public source issue repository, OWNER/NAME, allowed by the selected bounds; empty uses repo. Not for review or fix"
+        type: string
+        default: ''
       item:
-        description: Positive issue number in the target repository (a pull request's for review and fix)
+        description: Positive issue number in issue_repo or repo (a pull request's in repo for review and fix)
         type: string
         required: true
       kind:
         description: Fixed profile (review and fix take a pull request number; fix only where fix.toml or midstream-fix.toml allows it)
         type: choice
-        options: [implement, triage, research, review, fix]
+        options: [implement, triage, research, session, review, fix]
         required: true
+      head:
+        description: "Review only: required exact lowercase 40-hex expected PR head"
+        type: string
+        default: ''
       pool:
-        description: "Inference pool: claude (.github/agentic-job/pools.json); empty uses the variables AGENT and AGENT_MODEL"
+        description: "Non-review: pools.json or empty for AGENT/AGENT_MODEL. Review: required key in trusted REVIEW_POOLS, resolved only by the pinned wrapper"
+        type: string
+        default: ''
+      # Prevent arbitrary model selection and silent downgrade: the only
+      # opt-in is heavy, resolved within the same deployment-owned pool.
+      effort:
+        description: "Optional model variant: empty preserves defaults; heavy requires the effective pool's heavy.model (not for reviews)"
         type: string
         default: ''
       config:
@@ -53,18 +74,189 @@ on:
         type: choice
         options: [hosted, acp-experiment]
         default: hosted
+      runner:
+        description: "Caller-owned runner profile; external execution is not implemented"
+        type: string
+        default: hosted
 
 permissions: {}
+# The agent-board commit that resolves the pool, a revision reviewed here
+# like the pass's in poll.yml, never agent-board's moving branch.
+env:
+  AGENT_BOARD_REV: 52adc0d6996cbe7e56cfec0598b6194cfab74357
 concurrency:
   group: dispatch-${{ inputs.kind }}-${{ inputs.repo }}-${{ inputs.item }}
   cancel-in-progress: false
 
 jobs:
+  # Threat: issue/plan text could redirect execution to a credential-bearing
+  # runner or arbitrary workflow. Only this caller commit owns the closed map.
+  # No external entry, even enabled, can start execution in this slice.
+  runner-gate:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 1
+    permissions:
+      contents: read
+    steps:
+      - if: inputs.runner != 'hosted'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github/agentic-job/runner-profiles.json
+            .github/agentic-job/midstream.toml
+      - name: Validate runner profile
+        env:
+          RUNNER_PROFILE: ${{ inputs.runner }}
+          KIND: ${{ inputs.kind }}
+          REPO: ${{ inputs.repo }}
+          POOL: ${{ inputs.pool }}
+          EFFORT: ${{ inputs.effort }}
+          CONFIG: ${{ inputs.config }}
+          DETECT_MODEL: ${{ vars.AGENTIC_JOB_DETECT_MODEL }}
+          CALLER_REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The target's live metadata, which the midstream rule is checked against.
+          if [[ $RUNNER_PROFILE != hosted ]]; then TARGET=$(gh api "repos/${REPO}"); export TARGET; fi
+          python3 - <<'PY'
+          import json, os, re, sys, tomllib
+          from pathlib import Path
+
+          def require(ok, message):
+              if not ok:
+                  sys.exit(message)
+
+          name = os.environ['RUNNER_PROFILE']
+          if name == 'hosted':
+              sys.exit(0)  # Do not even open the map or midstream bounds.
+          require(os.environ['CALLER_REF'] == 'refs/heads/' + os.environ['DEFAULT_BRANCH'],
+                  'external runner requires the trusted caller default branch')
+
+          def unique(pairs):
+              result = {}
+              for key, value in pairs:
+                  require(key not in result, 'duplicate runner map key')
+                  result[key] = value
+              return result
+
+          def keys(value, required, optional=()):
+              require(type(value) is dict and set(required) <= value.keys()
+                      and value.keys() <= set(required) | set(optional), 'invalid runner map keys')
+
+          def matches(value, pattern):
+              return type(value) is str and re.fullmatch(pattern, value) is not None
+
+          profiles = json.loads(Path('.github/agentic-job/runner-profiles.json').read_text(),
+                                object_pairs_hook=unique)
+          require(type(profiles) is dict, 'runner map must be an object')
+          limits = ('vcpus', 'memory-gib', 'disk-gib', 'max-guests', 'job-minutes',
+                    'lifetime-minutes', 'max-attempts', 'artifact-retention-days')
+          for key, profile in profiles.items():
+              require(key != 'hosted' and matches(key, r'[a-z0-9][a-z0-9_-]{0,31}'),
+                      'invalid runner profile name')
+              keys(profile, ('enabled', 'repository', 'workflow', 'ref', 'commit',
+                             'agentic-job', 'actions', 'inputs', 'kvm', 'limits'), ('libvirt',))
+              require(type(profile['enabled']) is bool and type(profile['kvm']) is bool,
+                      'runner enabled/kvm must be booleans')
+              require('libvirt' not in profile or profile['libvirt'] == 'session',
+                      'runner libvirt must be session or absent')
+              require(matches(profile['repository'], r'[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+')
+                      and profile['repository'].split('/')[1] not in ('.', '..')
+                      and not profile['repository'].endswith('.git'), 'invalid runner repository')
+              require(matches(profile['workflow'], r'\.github/workflows/[A-Za-z0-9_-]+\.ya?ml'),
+                      'invalid runner workflow path')
+              ref = profile['ref']
+              require(matches(ref, r'[A-Za-z0-9_-][A-Za-z0-9_./-]*') and '..' not in ref
+                      and '//' not in ref and not ref.endswith(('/', '.', '.lock')),
+                      'invalid runner branch ref')
+              for pin in ('commit', 'agentic-job', 'actions'):
+                  require(matches(profile[pin], r'[0-9a-f]{40}'), 'runner pins must be immutable lowercase commits')
+              inputs = profile['inputs']
+              require(type(inputs) is dict and all(matches(k, r'[A-Za-z][A-Za-z0-9_-]*')
+                      and type(v) is str for k, v in inputs.items()), 'runner inputs must be fixed strings')
+              # These belong to trusted dispatch, not the deployment's fixed choices.
+              require(not set(inputs) & {'task', 'kind', 'repo', 'item', 'base', 'head',
+                      'base-commit', 'dispatch-id', 'runner'}, 'runner inputs override dispatch identity')
+              keys(profile['limits'], limits)
+              require(all(type(profile['limits'][k]) is int and profile['limits'][k] > 0
+                          for k in limits), 'runner limits must be positive integers')
+              require(profile['limits']['job-minutes'] < profile['limits']['lifetime-minutes'] <= 330,
+                      'runner lifetime must exceed job time and fit the 330-minute waiting ceiling')
+          require(name in profiles, 'unknown runner profile')
+          profile = profiles[name]
+          require(profile['enabled'], 'runner profile is disabled')
+          require(os.environ['KIND'] == 'implement', 'external runner requires implement')
+          rules = tomllib.loads(Path('.github/agentic-job/midstream.toml').read_text())['repos']
+          target = json.loads(os.environ['TARGET'])
+          require(target['full_name'].lower() == os.environ['REPO'].lower() and any(
+                  target['owner']['login'].lower() == rule['org'].lower() and target['fork'] is rule['forks']
+                  and set(rule['topics']) <= set(target['topics']) for rule in rules),
+                  'external runner target is outside midstream bounds')
+          require(not os.environ['POOL'] and not os.environ['EFFORT'], 'external runner refuses pool/effort')
+          require(os.environ['CONFIG'] == 'hosted', 'external runner requires hosted config')
+          require(os.environ['DETECT_MODEL'].strip(), 'external runner requires trusted detection configuration')
+          sys.exit('external runner execution is unimplemented')
+          PY
+
+  # Threat: a manual/producer review dispatch could start duplicate, unpaced
+  # inference while legacy events remain authoritative. Only a trusted repo
+  # variable can activate this route; dispatch inputs cannot override it.
+  review-gate:
+    needs: runner-gate
+    if: ${{ inputs.kind == 'review' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 1
+    permissions: {}
+    steps:
+      - name: Validate dormant review route
+        env:
+          ACTIVATION: ${{ vars.REVIEW_DISPATCH }}
+          HEAD: ${{ inputs.head }}
+          EFFORT: ${{ inputs.effort }}
+          CONFIG: ${{ inputs.config }}
+          ISSUE_REPO: ${{ inputs.issue_repo }}
+        run: |
+          node -e '
+          if (process.env.ACTIVATION !== "enabled") throw Error("ordinary reviews are disabled");
+          if (!/^[0-9a-f]{40}$/.test(process.env.HEAD) || process.env.HEAD.length !== 40) throw Error("review requires exact expected head");
+          if (process.env.EFFORT || process.env.CONFIG !== "hosted") throw Error("review configuration belongs to REVIEW_POOLS");
+          // Prevent foreign issue context from being silently attributed to the reviewed PR.
+          if (process.env.ISSUE_REPO) throw Error("issue_repo is not for review or fix");
+          '
+
+  review:
+    needs: review-gate
+    if: ${{ inputs.kind == 'review' }}
+    # The same wrapper commit as the run job's, the one our broker admits.
+    uses: jmarrero-forge/actions/.github/workflows/cgwalters-agentic-job.yml@cb9a5e2183e0a33612af916507dd864e7a464154 # main, agentic-job v0.6.15 (actions#4)
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+      actions: read
+      id-token: write
+    with:
+      kind: review
+      repo: ${{ inputs.repo }}
+      item: ${{ inputs.item }}
+      head: ${{ inputs.head }}
+      pool: ${{ inputs.pool }}
+      task: Review the expected head using base-owned policy.
+    # No secrets: publication uses this base repository's job token.
+
   # The task the agent gets: this kind's profile, then what was dispatched.
   # Read from the commit the run is on, which the wrapper requires to be
   # the default branch's, so a profile changes only by a merge here.
   profile:
+    needs: runner-gate
+    if: ${{ inputs.kind != 'review' }}
     runs-on: ubuntu-26.04
+    # Room for the crates.io fallback for just and the verified download.
+    timeout-minutes: 15
     permissions:
       contents: read
     outputs:
@@ -84,35 +276,48 @@ jobs:
             .github/agentic-job/profiles
             .github/agentic-job/pools.json
             .github/agentic-job/midstream.toml
-            .github/agentic-job/midstream-fix.toml
+            .github/agent-board-install
+            Justfile
+      # A GitHub release outage must not stop the job: build the same just
+      # from crates.io instead, as poll.yml does.
+      - id: just
+        continue-on-error: true
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: 1.58.0
+      - if: steps.just.outcome == 'failure'
+        run: cargo install --locked --version 1.58.0 just && echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Install verified agent-board
+        env:
+          GH_TOKEN: ${{ github.token }}
+        timeout-minutes: 10
+        run: just build-agent-board "$AGENT_BOARD_REV"
       # The pool's agent, model and budget, all empty without a pool so that
       # the wrapper falls back to the variables and its default budget, and
       # whether that agent gets agentic-job's skills. A
       # name outside pools.json stops the run here rather than reaching the
-      # wrapper.
+      # wrapper. Heavy replaces only the pool's model; it requires an explicit
+      # pool or the one pool matching AGENT/AGENT_MODEL, never a guess from
+      # the agent alone, and its valid heavy.model; inherited agent/budget
+      # fallbacks stay unchanged. Reviews never take heavy: their model
+      # contract is separately pinned and base-owned (#1198). An error writes
+      # no outputs. A session without a pool, one started by hand, takes the
+      # claude pool rather than the variables: it reads the whole repository
+      # (agent-board's docs/sessions.md) and needs that pool's budget.
       - name: Resolve the pool
         id: pool
+        timeout-minutes: 1
         env:
-          POOL: ${{ inputs.pool }}
+          POOL: ${{ inputs.pool || (inputs.kind == 'session' && 'claude' || '') }}
+          EFFORT: ${{ inputs.effort }}
           KIND: ${{ inputs.kind }}
           # The wrapper's fallback without a pool, its default included.
           AGENT: ${{ vars.AGENT || 'claude' }}
+          AGENT_MODEL: ${{ vars.AGENT_MODEL }}
         run: |
-          pools=.github/agentic-job/pools.json
-          if [[ -n "$POOL" ]] && ! jq -e --arg pool "$POOL" 'has($pool)' "$pools" > /dev/null; then
-            echo "::error::unknown pool '${POOL}'; expected one of: $(jq -r 'keys | join(", ")' "$pools")"
-            exit 1
-          fi
-          # The wrapper installs agentic-job's skills for claude and opencode
-          # only (`skills` below); vibe gets none, so the next step gives it
-          # the full profile instead. fake reads no task.
-          agent=${POOL:+$(jq -r --arg pool "$POOL" '.[$pool].agent' "$pools")}
-          agent=${agent:-$AGENT}
-          skilled=false
-          [[ "$agent" =~ ^(claude|opencode|fake)$ ]] && skilled=true
-          echo "skilled=${skilled}" >> "$GITHUB_OUTPUT"
-          [[ -z "$POOL" ]] && { printf "agent=\nmodel=\nbudget=\n" >> "$GITHUB_OUTPUT"; exit 0; }
-          jq -r --arg pool "$POOL" '.[$pool] | "agent=\(.agent)\nmodel=\(.model)\nbudget=\(.budget)"' "$pools" >> "$GITHUB_OUTPUT"
+          "$RUNNER_TEMP/agent-board/bin/agent-board" pools resolve --pools .github/agentic-job/pools.json \
+            --pool "$POOL" --effort "$EFFORT" --kind "$KIND" \
+            --fallback-agent "$AGENT" --fallback-model "$AGENT_MODEL" >> "$GITHUB_OUTPUT"
       # The runner configuration's path, from the closed set alone: a path
       # a dispatcher typed could name any file of this repository as the
       # run's configuration, the bounds files included. Empty for hosted, so
@@ -130,28 +335,69 @@ jobs:
           echo "config=${path}" >> "$GITHUB_OUTPUT"
       # The bounds, by kind and target. Comment-only kinds have their own,
       # comment.toml, the only ones that admit bootc-dev besides fix.toml
-      # (upstream's D17). A midstream fork, a target that
-      # midstream.toml or midstream-fix.toml lists, gets those, which keep
-      # its pull requests drafts (#336); their repos lists are the only list
-      # of midstreams here. The wrapper takes `fix-allow` for fix and
-      # `allow` for every other kind.
+      # (upstream's D17). A session has session.toml: its batch
+      # is one comment too, which the pass alone applies, within the pass's
+      # own bounds (agent-board's docs/sessions.md), but only on
+      # jmarrero-forge, never bootc-dev. A midstream fork gets
+      # midstream.toml and midstream-fix.toml, which keep its pull requests
+      # drafts (#336): a target whose live metadata matches midstream.toml's
+      # rule, the organization, fork flag and topics that its policy checks
+      # again. A failed lookup stops the run rather than picking the
+      # ordinary bounds. The wrapper takes `fix-allow` for fix and `allow`
+      # for every other kind.
+      - name: Read the target's metadata
+        id: target
+        env:
+          REPO: ${{ inputs.repo }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          target=$(gh api "repos/${REPO}")
+          TARGET=$target python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, tomllib
+          rules = tomllib.load(open('.github/agentic-job/midstream.toml', 'rb'))['repos']
+          target = json.loads(os.environ['TARGET'])
+          if target['full_name'].lower() != os.environ['REPO'].lower():
+              raise SystemExit(f"metadata names {target['full_name']}, not {os.environ['REPO']}")
+          midstream = any(target['owner']['login'].lower() == rule['org'].lower() and target['fork'] is rule['forks']
+                          and set(rule['topics']) <= set(target['topics']) for rule in rules)
+          print(f'midstream={str(midstream).lower()}')
+          PY
+      # A triage whose item is a pull request of the target is agent-board's
+      # PR recovery (pass.json's pr.agentRecovery): it gets recovery.toml,
+      # which may close that repository's pull requests and file an issue
+      # there. Any other triage has an issue as its item and keeps
+      # comment.toml. A failed or moved lookup stops the run.
+      - name: Read whether the item is a pull request
+        id: item
+        if: inputs.kind == 'triage' && inputs.issue_repo == ''
+        env:
+          REPO: ${{ inputs.repo }}
+          ITEM: ${{ inputs.item }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ $ITEM =~ ^[1-9][0-9]*$ ]] || { echo "::error::item '${ITEM}' is not a number"; exit 1; }
+          read -r number pull < <(gh api "repos/${REPO}/issues/${ITEM}" --jq '"\(.number) \(.pull_request != null)"') || true
+          [[ $number == "$ITEM" && ($pull == true || $pull == false) ]] ||
+            { echo "::error::no issue or pull request ${REPO}#${ITEM}"; exit 1; }
+          echo "pull=${pull}" >> "$GITHUB_OUTPUT"
       - name: Resolve the bounds
         id: bounds
         env:
           KIND: ${{ inputs.kind }}
-          REPO: ${{ inputs.repo }}
+          PULL: ${{ steps.item.outputs.pull }}
+          MIDSTREAM: ${{ steps.target.outputs.midstream }}
         run: |
           dir=.github/agentic-job
-          listed() {
-            sed -n '/^repos = /{s///p;q}' "$1" |
-              jq -e --arg repo "${REPO,,}" 'map(ascii_downcase) | index($repo)' > /dev/null
-          }
+          [[ $MIDSTREAM == true || $MIDSTREAM == false ]] ||
+            { echo "::error::no midstream decision for the target: '${MIDSTREAM}'"; exit 1; }
           case "$KIND" in
-            triage|research) allow=$dir/comment.toml ;;
-            *) allow=$dir/dispatch.toml; listed "$dir/midstream.toml" && allow=$dir/midstream.toml ;;
+            triage) allow=$dir/comment.toml; [[ ${PULL:-} == true ]] && allow=$dir/recovery.toml ;;
+            research) allow=$dir/comment.toml ;;
+            session) allow=$dir/session.toml ;;
+            *) allow=$dir/dispatch.toml; [[ $MIDSTREAM == true ]] && allow=$dir/midstream.toml ;;
           esac
           fix=$dir/fix.toml
-          listed "$dir/midstream-fix.toml" && fix=$dir/midstream-fix.toml
+          [[ $MIDSTREAM == true ]] && fix=$dir/midstream-fix.toml
           printf 'allow=%s\nfix-allow=%s\n' "$allow" "$fix" >> "$GITHUB_OUTPUT"
       - name: Put the profile before the task
         id: compose
@@ -183,7 +429,8 @@ jobs:
 
   run:
     needs: profile
-    uses: jmarrero-forge/actions/.github/workflows/cgwalters-agentic-job.yml@3bbed7bfd3c81fc6620fd5f49a5c1bbaf4629e6c # main, agentic-job v0.6.9 (actions#3)
+    if: ${{ inputs.kind != 'review' }}
+    uses: jmarrero-forge/actions/.github/workflows/cgwalters-agentic-job.yml@cb9a5e2183e0a33612af916507dd864e7a464154 # main, agentic-job v0.6.15 (actions#4)
     # The most any job of the wrapper has: its agent job takes the reads and
     # the identity token, its policy and apply calls the comment writes.
     permissions:
@@ -196,6 +443,10 @@ jobs:
       task: ${{ needs.profile.outputs.task }}
       repo: ${{ inputs.repo }}
       item: ${{ inputs.item }}
+      # Threat: a source issue must not redirect checkout/PR output or admit an
+      # arbitrary owner. Policy checks item-repo against the selected bounds;
+      # the wrapper uses it only for issue context, reporting and closing links.
+      item-repo: ${{ inputs.issue_repo }}
       kind: ${{ inputs.kind }}
       agent: ${{ needs.profile.outputs.agent }}
       model: ${{ needs.profile.outputs.model }}
@@ -213,9 +464,49 @@ jobs:
       apply-environment: agent-apply
       # From the profile job, which says how it picks them.
       allow: ${{ needs.profile.outputs.allow }}
+      # Recovery triage's closing and filing outputs come from recovery.toml
+      # (actions#276); every other triage keeps the wrapper's comment-only set.
+      triage-outputs-from-allow: ${{ needs.profile.outputs.allow == '.github/agentic-job/recovery.toml' }}
       fix-allow: ${{ needs.profile.outputs.fix-allow }}
     # The bot's token, an organization secret, named and never inherited.
     # The wrapper hands it to apply, in the environment above, and to the
     # status comment on an item of another repository; to nothing else.
     secrets:
       SAFE_OUTPUTS_PAT: ${{ secrets.JMARRERO_BOT_PAT }}
+
+  # Threat: raw diagnostic inputs can leak through Actions' pre-script env log.
+  # Opt-in public metadata only, never admission or producer attestation.
+  # Do not put dispatch inputs in env: Actions prints env before run starts.
+  admission-receipt:
+    needs: [profile, run]
+    if: ${{ always() && inputs.kind != 'review' && vars.DISPATCH_ADMISSION_RECEIPT == 'enabled' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 1
+    permissions: {}
+    steps:
+      - name: Record dispatch admission outcome
+        env:
+          ALLOW: ${{ contains(fromJSON('[".github/agentic-job/dispatch.toml",".github/agentic-job/comment.toml",".github/agentic-job/midstream.toml"]'), needs.profile.outputs.allow) && needs.profile.outputs.allow || '' }}
+          FIX_ALLOW: ${{ contains(fromJSON('[".github/agentic-job/fix.toml",".github/agentic-job/midstream-fix.toml"]'), needs.profile.outputs.fix-allow) && needs.profile.outputs.fix-allow || '' }}
+          PROFILE_RESULT: ${{ needs.profile.result }}
+          WRAPPER_RESULT: ${{ needs.run.result }}
+        run: |
+          node -e '
+          const e = process.env;
+          const inputs = JSON.parse(require("node:fs").readFileSync(e.GITHUB_EVENT_PATH, "utf8")).inputs || {};
+          const text = (v, pattern, max = 256) => typeof v === "string" && v.length <= max && pattern.test(v) ? v : "";
+          const choice = (v, values) => values.includes(v) ? v : "";
+          const kind = choice(inputs.kind, ["implement", "fix", "triage", "research"]);
+          const allow = choice(e.ALLOW, [".github/agentic-job/dispatch.toml", ".github/agentic-job/comment.toml", ".github/agentic-job/midstream.toml"]);
+          const fix = choice(e.FIX_ALLOW, [".github/agentic-job/fix.toml", ".github/agentic-job/midstream-fix.toml"]);
+          const result = v => choice(v, ["success", "failure", "cancelled", "skipped"]);
+          console.log(JSON.stringify({ schema: "tracker-dispatch-admission/v1",
+            run_id: text(e.GITHUB_RUN_ID, /^[0-9]+$/, 20), run_attempt: text(e.GITHUB_RUN_ATTEMPT, /^[0-9]+$/, 10),
+            event: choice(e.GITHUB_EVENT_NAME, ["workflow_dispatch"]),
+            actor: text(e.GITHUB_ACTOR, /^[A-Za-z0-9_-]+(?:\[bot\])?$/, 100),
+            triggering_actor: text(e.GITHUB_TRIGGERING_ACTOR, /^[A-Za-z0-9_-]+(?:\[bot\])?$/, 100),
+            kind, repo: text(inputs.repo, /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/, 201),
+            item: text(inputs.item, /^[1-9][0-9]*$/, 15), allow, fix_allow: fix,
+            selected_bounds: kind === "fix" ? fix : allow,
+            profile_result: result(e.PROFILE_RESULT), wrapper_result: result(e.WRAPPER_RESULT) }));
+          '

@@ -1,20 +1,24 @@
 # Bounds for dispatch.yml: the repositories a dispatched run may target.
-# Exact names, no globs; add a repository here before dispatching to it.
-# The forge's forks of the upstreams the bot works on are not listed here:
-# their bounds are midstream.toml, which dispatch.yml picks for them, so
-# that every pull request there stays a draft (#336 upstream).
-# homegit is a target by hand only: the pass does not schedule it.
+# Our own repositories by exact name: they are GitHub forks of
+# cgwalters-forge's, so upstream's organization rule (public, unarchived
+# and not a fork) would not admit them. The midstream forks are not
+# admitted here: their bounds are midstream.toml, which dispatch.yml picks
+# for them by their metadata, so that every pull request there stays a
+# draft (#336 upstream). Other owners' repositories are exact names, no
+# globs. homegit is a target by hand only: the pass does not schedule it.
 # The private jmarrero-forge/bot-ops stays no target: a run
 # dispatched here publishes its transcript and outputs in this public
 # repository (agentic-job's docs/private-repositories.md), the policy job
 # refuses a private target and the wrapper a private caller. A private
 # target would need a dispatch workflow and agent job in bot-ops itself.
 hosts = ["github.com"]
-repos = ["jmarrero-forge/tracker", "jmarrero-forge/actions", "jmarrero-forge/homegit"]
+repos = ["jmarrero-forge/tracker", "jmarrero-forge/actions", "jmarrero-forge/agenthome", "jmarrero-forge/homegit"]
 bases = ["main"]
 max_outputs = 3
 max_patch_bytes = 1048576
 max_patch_files = 50
+# A misled run must not change the caller's execution destinations.
+protected = [".github/agentic-job/runner-profiles.json"]
 
 [github.outputs]
 # `ready_when_complete`: apply opens complete work ready for review and only

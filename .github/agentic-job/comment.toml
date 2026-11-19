@@ -11,8 +11,8 @@
 # bootc-dev is external, so this file opens no pull request and exempts no
 # protected file anywhere.
 hosts = ["github.com"]
-# config-test/ keeps every name of dispatch.toml and midstream.toml here.
-repos = ["jmarrero-forge/tracker", "jmarrero-forge/actions", "jmarrero-forge/homegit", "jmarrero-forge/bootc", "jmarrero-forge/composefs-rs", "jmarrero-forge/bcvk", "jmarrero-forge/rpm-ostree", "jmarrero-forge/ostree", "jmarrero-forge/image-builder", "jmarrero-forge/osbuild", "bootc-dev/*"]
+# config-test/ keeps every entry of dispatch.toml and midstream.toml here.
+repos = ["jmarrero-forge/tracker", "jmarrero-forge/actions", "jmarrero-forge/agenthome", "jmarrero-forge/homegit", { org = "jmarrero-forge", forks = true, topics = ["bot-midstream"], properties = { origin = "fork" } }, { org = "bootc-dev", forks = false }]
 bases = ["main"]
 max_outputs = 3
 max_patch_bytes = 1048576
