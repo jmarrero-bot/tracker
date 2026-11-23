@@ -1,8 +1,8 @@
 {
   "schema": "agent-board.release.v1",
-  "repository": "cgwalters-forge/agent-board",
-  "commit": "819bb77db70b451874317aff4ea4b61ab174557e",
-  "tag": "build-819bb77db70b451874317aff4ea4b61ab174557e",
+  "repository": "jmarrero-forge/agent-board",
+  "commit": "a24176b07152e8338769eacffb1a5d42caee1321",
+  "tag": "",
   "target": "x86_64-unknown-linux-musl",
-  "sha256sums": "5560cba5f57c5d558be33865bd6447cdf724c7fecebe7b564f5ced2f64b7114a  agent-board-x86_64-unknown-linux-musl\n16c14d723beb9b8617042aaa6024f6d9ed17b4fa78c9bd8a036acd3b1f8717f1  gh-agent-board-x86_64-unknown-linux-musl\n"
+  "sha256sums": "4dea16a6a8353ae9061f8c536b4c46c4fdf32b4013ad639757a895ce16b870c6  agent-board-x86_64-unknown-linux-musl\nbc1cbea55630adc9c189b20a8a816892a0cdd62b598e783bdc79b7dc4e356619  gh-agent-board-x86_64-unknown-linux-musl\n"
 }
