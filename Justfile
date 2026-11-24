@@ -5,7 +5,7 @@
 set positional-arguments
 
 # Repository and workflow checks run by CI.
-test: test-runner-profiles test-agent-board-install test-config test-pass-config test-poll-bounds test-poll-next test-pass-state agent-board-pin
+test: test-runner-profiles test-agent-board-install test-config test-pass-config test-poll-bounds test-poll-next test-pass-state agent-board-pin test-agent-board-bump
 
 # Execute the workflow's actual resolver, without credentials or forge traffic.
 test-runner-profiles:
@@ -451,6 +451,106 @@ agent-board-pin:
     fi
     echo "$pins"
 
+# Opens or updates the one pull request, from the bot's fork, that moves
+# every AGENT_BOARD_REV to the newest installable main CI commit in a bounded
+# scan, once it is ahead of the pin (agent-board-pin.yml). It commits in this
+# checkout, and needs GITHUB_REPOSITORY and GH_TOKEN to push and open the PR.
+# Ours: with no newer commit to move to, it fails once the pin's artifact
+# nears expiry, since installs have no release to fall back on. Otherwise
+# the open bump pull request is the signal.
+bump-agent-board:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pin=$({{ just_executable() }} agent-board-pin)
+    upstream={{ agent_board_repo }} branch={{ agent_board_branch }} bot={{ agent_board_bot }}
+    source=https://github.com/$upstream
+    selected=$({{ just_executable() }} select-agent-board latest "$branch")
+    head=$(jq -r '.sha // empty' <<< "$selected")
+    if [[ -z $head || $head == "$pin" ]]; then
+      run=$({{ just_executable() }} select-agent-board "$pin" "$branch" | jq -r '.run // empty')
+      expires=$(if [[ -n $run ]]; then timeout 20 gh api "repos/$upstream/actions/runs/$run/artifacts?per_page=100" |
+        jq -r '[.artifacts[] | select(.name == "agent-board-main" and .expired == false)][0].expires_at // empty'; fi)
+      if [[ -z $expires ]]; then
+        echo "::error::the pin $pin has no unexpired agent-board-main artifact and $upstream $branch no newer one: installs fail"; exit 1
+      fi
+      if (( $(date -ud "$expires" +%s) - $(date -u +%s) < {{ agent_board_expiry_days }} * 86400 )); then
+        echo "::error::the pin $pin's agent-board-main artifact expires $expires and $upstream $branch has no newer installable commit; installs fail after then"; exit 1
+      fi
+      echo "no newer installable $branch commit; the pin's artifact expires $expires"; exit 0
+    fi
+    [[ $head =~ ^[0-9a-f]{40}$ ]]
+    (export RUNNER_TEMP=$(mktemp -d); trap 'rm -rf "$RUNNER_TEMP"' EXIT
+      GITHUB_OUTPUT=/dev/null {{ just_executable() }} build-agent-board "$head")
+    # Never backwards or onto rewritten history; compare lists at most 250 commits.
+    compare=$(gh api "repos/$upstream/compare/$pin...$head")
+    status=$(jq -r .status <<< "$compare")
+    [[ $status == ahead ]] || { echo "::error::$head is $status of the pin $pin, not ahead"; exit 1; }
+    title="workflows: Move agent-board to ${head:0:7}"
+    pr_branch=agent-board-pin
+    open=$(gh pr list --repo "$GITHUB_REPOSITORY" --author "$bot" --head "$pr_branch" --state open --json number,title --jq '.[0] // empty')
+    if [[ $(jq -r '.title // ""' <<< "$open") == "$title" ]]; then echo "already proposed: $title"; exit 0; fi
+    fork=$(gh api --paginate "repos/$GITHUB_REPOSITORY/forks" --jq ".[] | select(.owner.login == \"$bot\") | .full_name" | head -n1)
+    [[ -n $fork ]] || { echo "::error::$bot has no fork of $GITHUB_REPOSITORY"; exit 1; }
+    body=$(
+      echo "Every \`AGENT_BOARD_REV\` in \`.github/workflows/\` moves from $pin to $head, the newest $branch commit with a successful CI artifact in the discovery window. Its attestation and checksums verified before this proposal. Review [what changes]($source/compare/$pin...$head) in the program given the bot's token. The agent-board commits in between:"
+      echo
+      # Subjects in code spans, so their #N and @login do not reference here.
+      jq -r --arg s "$source" '.commits[] | "- [\(.sha[0:7])](\($s)/commit/\(.sha)) `\(.commit.message | split("\n")[0] | gsub("`"; "'\''"))`"' <<< "$compare"
+      jq -r 'if .total_commits > (.commits | length) then "\n\(.total_commits - (.commits | length)) more commits are not listed." else empty end' <<< "$compare"
+    )
+    sed -i "s/^  AGENT_BOARD_REV: $pin\$/  AGENT_BOARD_REV: $head/" .github/workflows/*.yml
+    [[ $({{ just_executable() }} agent-board-pin) == "$head" ]]
+    email=$(gh api "users/$bot" --jq '"\(.id)+\(.login)@users.noreply.github.com"')
+    git -c user.name="$bot" -c user.email="$email" commit -q -a -m "$title" -m "$body"
+    gh auth setup-git
+    git push -q --force "https://github.com/$fork" "HEAD:refs/heads/$pr_branch"
+    if [[ -n $open ]]; then
+      gh pr edit "$(jq -r .number <<< "$open")" --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+    else
+      gh pr create --repo "$GITHUB_REPOSITORY" --head "${fork%%/*}:$pr_branch" --base "$(gh repo view "$GITHUB_REPOSITORY" --json defaultBranchRef --jq .defaultBranchRef.name)" --title "$title" --body "$body"
+    fi
+
+# bump-agent-board with nothing newer than the pin, against a stub gh that
+# answers only the selector's and the expiry check's reads: the pin's
+# artifact expiry decides, and no other call (build, push, PR) is made.
+test-agent-board-bump:
+    #!/usr/bin/env node
+    const assert = require('node:assert/strict');
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const { execFileSync, spawnSync } = require('node:child_process');
+    const just = '{{ just_executable() }}';
+    const pin = execFileSync(just, ['agent-board-pin'], { encoding: 'utf8' }).trim();
+    const temp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'agent-board-bump-'));
+    fs.writeFileSync(path.join(temp, 'gh'), `#!${process.execPath}
+    const args = process.argv.slice(2), e = process.env, out = v => console.log(JSON.stringify(v));
+    require('node:fs').appendFileSync(e.CALLS, JSON.stringify(args) + '\\n');
+    if (args[0] !== 'api' || args.length !== 2) process.exit(3);
+    if (args[1].includes('/actions/workflows/ci.yml/runs?')) out({ workflow_runs: e.RUNS ? [{ id: 42, head_sha: e.PIN, head_branch: '{{ agent_board_branch }}', event: 'push', status: 'completed', conclusion: 'success', path: '.github/workflows/ci.yml' }] : [] });
+    else if (args[1].includes('/commits?')) out([{ sha: e.PIN }]);
+    else if (args[1].endsWith('/runs/42/artifacts?per_page=100')) out({ artifacts: e.EXPIRES ? [{ name: 'agent-board-main', expired: false, expires_at: e.EXPIRES }] : [] });
+    else process.exit(3);
+    `, { mode: 0o755 });
+    const days = n => new Date(Date.now() + n * 86400000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+    const calls = path.join(temp, 'calls');
+    const [later, sooner] = [days(22), days(20)];
+    try {
+      for (const [runs, expires, success, message] of [['1', later, true, `the pin's artifact expires ${later}`],
+        ['1', sooner, false, `::error::the pin ${pin}'s agent-board-main artifact expires ${sooner}`],
+        ['1', '', false, `::error::the pin ${pin} has no unexpired`], ['', '', false, `::error::the pin ${pin} has no unexpired`]]) {
+        fs.writeFileSync(calls, '');
+        const got = spawnSync(just, ['bump-agent-board'], { encoding: 'utf8', env: { PATH: `${temp}:${process.env.PATH}`,
+          CALLS: calls, PIN: pin, RUNS: runs, EXPIRES: expires, GITHUB_REPOSITORY: 'owner/tracker' } });
+        const log = `${runs ? 'run' : 'no run'} ${expires || 'no artifact'}: ${got.stdout}${got.stderr}`;
+        assert.equal(got.status === 0, success, log);
+        assert.ok(got.stdout.includes(message), log);
+        const seen = fs.readFileSync(calls, 'utf8').trim().split('\n').map(JSON.parse);
+        assert.ok(seen.every(args => args[0] === 'api' && args.length === 2), log);
+        assert.equal(seen.some(args => args[1].endsWith('/runs/42/artifacts?per_page=100')), runs !== '', log);
+      }
+    } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+    console.log('ok bump-agent-board fails, naming the date, within 21 days of the pin artifact expiring with nothing newer');
+
 # The runner configuration's checks; those that run `agentic-job` skip where
 # it is not installed. The build goes outside the source tree.
 test-config:
@@ -468,12 +568,22 @@ test-pass-config:
     "$AGENT_BOARD" pass --check-config --config .github/pass.json \
       --fix-bounds .github/agentic-job/fix.toml --fix-bounds .github/agentic-job/midstream-fix.toml
 
+# Ours: the agent-board source the installer verifies and the pin bump
+# follows, and the bot whose fork proposes the bump. A resync keeps these.
+agent_board_repo := 'cgwalters-forge/agent-board'
+agent_board_branch := 'main'
+agent_board_bot := 'jmarrero-bot'
+
+# The pin's artifact retention, in days, under which bump-agent-board fails
+# when there is nothing newer to move to (90 when CI uploads it).
+agent_board_expiry_days := '21'
+
 # No moving refs or source fallback: substituted assets must not run with the
 # bot's write token. The attested manifest binds both digests to reviewed CI.
-select-agent-board rev branch='main':
+select-agent-board rev branch=agent_board_branch:
     #!/usr/bin/env bash
     set -euo pipefail
-    rev=$1 branch=$2 repo=cgwalters-forge/agent-board
+    rev=$1 branch=$2 repo={{ agent_board_repo }}
     [[ $rev == latest || $rev =~ ^[0-9a-f]{40}$ ]] || { echo 'expected pinned revision' >&2; exit 1; }
     branch=$(jq -rn --arg b "$branch" '$b | @uri')
     runs=$(timeout 20 gh api "repos/$repo/actions/workflows/ci.yml/runs?branch=$branch&event=push&status=success&per_page=100&head_sha=${rev/latest/}")
@@ -495,7 +605,7 @@ build-agent-board rev=env("AGENT_BOARD_REV", ""):
     rev=$1
     [[ $rev =~ ^[0-9a-f]{40}$ ]] || { echo 'expected a pinned 40-character AGENT_BOARD_REV' >&2; exit 1; }
     [[ $(uname -s)-$(uname -m) == Linux-x86_64 ]] || { echo 'agent-board binaries support only Linux x86_64' >&2; exit 1; }
-    repo=cgwalters-forge/agent-board target=x86_64-unknown-linux-musl
+    repo={{ agent_board_repo }} target=x86_64-unknown-linux-musl
     tag=build-$rev
     dest=$RUNNER_TEMP/agent-board/bin
     mkdir -p "$dest"
@@ -513,8 +623,8 @@ build-agent-board rev=env("AGENT_BOARD_REV", ""):
     fi
     GH_TOKEN='' GITHUB_TOKEN='' timeout 180 gh attestation verify "$stage/release.json" \
       --bundle "$stage/provenance.jsonl" --repo "$repo" \
-      --cert-identity "https://github.com/$repo/.github/workflows/ci.yml@refs/heads/main" \
-      --source-ref refs/heads/main --source-digest "$rev" --deny-self-hosted-runners
+      --cert-identity "https://github.com/$repo/.github/workflows/ci.yml@refs/heads/{{ agent_board_branch }}" \
+      --source-ref refs/heads/{{ agent_board_branch }} --source-digest "$rev" --deny-self-hosted-runners
     jq -e --arg repo "$repo" --arg tag "$tag" --arg commit "$rev" --arg target "$target" \
       '.schema == "agent-board.release.v1" and .repository == $repo and .tag == $tag and .commit == $commit and .target == $target' "$stage/release.json" > /dev/null
     # Accept only the two fixed filenames, never paths supplied by a manifest.
