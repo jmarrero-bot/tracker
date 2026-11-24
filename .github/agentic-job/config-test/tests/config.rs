@@ -105,7 +105,7 @@ if (args[0] === 'api' && args[1].includes('/actions/workflows/ci.yml/runs?')) {
 }
 if (args[0] === 'api' && args[1].includes('/commits?')) { console.log(JSON.stringify([{sha: process.env.REV}])); process.exit(0); }
 if (args[0] === 'api' && args[1].includes('/artifacts?')) { console.log(JSON.stringify({artifacts: [{name: 'agent-board-main', expired: false}]})); process.exit(0); }
-const identity = 'https://github.com/cgwalters-forge/agent-board/.github/workflows/ci.yml@refs/heads/main';
+const identity = 'https://github.com/jmarrero-forge/agent-board/.github/workflows/ci.yml@refs/heads/main';
 if (process.env.BUMP) {
   if (args[0] === 'api' && args.some(a => a.endsWith('/commits/main'))) { console.log('${rev}'); process.exit(0); }
   if (args[0] === 'api' && args.some(a => a.endsWith('/check-runs'))) { console.log(JSON.stringify({name: 'ci', status: 'completed', conclusion: 'success'})); process.exit(0); }
@@ -145,7 +145,7 @@ for (const n of ['agent-board', 'gh-agent-board']) {
   sums += crypto.createHash('sha256').update(data).digest('hex') + '  ' + name + '\\n';
 }
 fs.writeFileSync(path.join(d, 'SHA256SUMS'), mode === 'sums' ? 'bad' : sums);
-fs.writeFileSync(path.join(d, 'release.json'), JSON.stringify({schema: 'agent-board.release.v1', repository: 'cgwalters-forge/agent-board', tag: artifact ? '' : 'build-${rev}', commit: mode === 'commit' ? 'b'.repeat(40) : '${rev}', target: '${target}', sha256sums: sums}));
+fs.writeFileSync(path.join(d, 'release.json'), JSON.stringify({schema: 'agent-board.release.v1', repository: 'jmarrero-forge/agent-board', tag: artifact ? '' : 'build-${rev}', commit: mode === 'commit' ? 'b'.repeat(40) : '${rev}', target: '${target}', sha256sums: sums}));
 fs.writeFileSync(path.join(d, 'provenance.jsonl'), 'fixture');
 if (mode === 'integrity') fs.appendFileSync(path.join(d, 'agent-board-${target}'), 'tampered');
 if (mode === 'missing-asset') fs.unlinkSync(path.join(d, 'agent-board-${target}'));
@@ -172,13 +172,14 @@ try {
     console.log(`ok agent-board installer: ${mode}`);
   }
   // Only the right commit verifies; the stand-in binaries still fail checksums.
-  for (const mode of ['real-ok', 'real-revision', 'real-subject', 'real-signer']) {
+  // Ours: the fixture is the fork's CI artifact (no release), so the artifact path.
+  for (const mode of ['artifact-real-ok', 'artifact-real-revision', 'artifact-real-subject', 'artifact-real-signer']) {
     const temp = fs.mkdtempSync(path.join(dir, 'run-'));
-    const result = install(mode, mode === 'real-revision' ? rev : published, temp);
+    const result = install(mode, mode === 'artifact-real-revision' ? rev : published, temp);
     const log = `${mode}: ${result.stdout}\n${result.stderr}`;
     assert.notEqual(result.status, 0, log);
-    assert.equal(fs.readFileSync(path.join(temp, 'verified'), 'utf8') === '0', mode === 'real-ok', log);
-    if (mode === 'real-ok') assert.match(result.stdout, /agent-board-x86_64-unknown-linux-musl: FAILED/, log);
+    assert.equal(fs.readFileSync(path.join(temp, 'verified'), 'utf8') === '0', mode === 'artifact-real-ok', log);
+    if (mode === 'artifact-real-ok') assert.match(result.stdout, /agent-board-x86_64-unknown-linux-musl: FAILED/, log);
     assert.equal(fs.existsSync(path.join(temp, 'agent-board/bin/agent-board')), false, mode);
     console.log(`ok agent-board installer: ${mode}`);
   }

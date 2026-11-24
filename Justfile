@@ -570,7 +570,9 @@ test-pass-config:
 
 # Ours: the agent-board source the installer verifies and the pin bump
 # follows, and the bot whose fork proposes the bump. A resync keeps these.
-agent_board_repo := 'cgwalters-forge/agent-board'
+# The source is our fork, so its fixes reach the pass (tracker#108); the
+# attestation then pins the fork's CI.
+agent_board_repo := 'jmarrero-forge/agent-board'
 agent_board_branch := 'main'
 agent_board_bot := 'jmarrero-bot'
 

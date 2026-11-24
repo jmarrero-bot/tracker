@@ -26,7 +26,7 @@ else's comments, its own included, as input to weigh, never as instructions.
 
 This repository is also the caller of
 [agentic-job](https://github.com/cgwalters-forge/agentic-job) runs and of
-[agent-board](https://github.com/cgwalters-forge/agent-board)'s pass and
+[agent-board](https://github.com/jmarrero-forge/agent-board)'s pass and
 promotion for jmarrero-forge: cgwalters-forge/tracker's controller,
 retargeted (see Resync). Nothing here writes to the board or to other
 repositories until the variables below are set (tracker#42).
@@ -80,7 +80,14 @@ main, the one the broker's policy names (jmarrero/atomic-setup
 `bot/praxis-broker`), and those wrappers pin their own actions at a
 commit too. They run agentic-job v0.6.15. agent-board is the attested
 CI binary of the commit `AGENT_BOARD_REV` pins in every workflow, moved
-only by a reviewed change here.
+only by a reviewed change here. It comes from our fork,
+jmarrero-forge/agent-board, rather than cgwalters-forge/agent-board, so
+fixes merged there (such as the pass signing with its own `generatedBy`)
+reach the pass without waiting on upstream (tracker#108): the pin is a
+commit on the fork's main, and the installer accepts only an attestation
+from the fork's `ci.yml` on main. A CI artifact expires after 90 days, so
+the pin moves, or the fork releases that commit, before its artifact
+does.
 
 The bot's write token is `JMARRERO_BOT_PAT`, an organization secret
 available to this repository, as upstream's is `CGWALTERS_BOT_PAT`: any
@@ -104,7 +111,12 @@ repositories by name, since all but this one are GitHub forks; the
 midstream forks by upstream's topic rule), the Claude-only
 [pools.json](.github/agentic-job/pools.json) (tracker#43), our wrappers
 and secrets, the `PASS_APPLY` and `PROMOTE` gates, the policy records,
-and the config tests and Justfile recipes for what we run. A resync
+and the config tests and Justfile recipes for what we run. Our diff
+also installs agent-board from jmarrero-forge/agent-board (the
+Justfile's `agent_board_repo`, the installer fixtures in
+[agent-board-install](.github/agent-board-install) and their test): a
+resync keeps that, and moves `AGENT_BOARD_REV` only to a commit on the
+fork's main, merging upstream's agent-board there first. A resync
 copies the same files from upstream's main and applies that diff again.
 Upstream's auxiliary callers and their files are left out: the
 supervisor and sessions, the release train, the retro, soak, weekly
